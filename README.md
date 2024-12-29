@@ -57,7 +57,7 @@ It provides:
 
 1. **Python 3.7+** (recommended)
 2. **PyQt5** (For the GUI).
-3. **Windows** environment for best results (Currently, all commands are Windows-specific).
+3. **Windows** environment for best results (Currently all commands are Windows specific).
 
 Install dependencies:
 
@@ -79,7 +79,7 @@ Copy code
     
     Copy code
     
-    `main.py`
+=======
     
 4. The Commander window appears. You’ll see:
     - A **search bar** (with a theme toggle switch).
