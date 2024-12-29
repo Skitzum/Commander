@@ -56,7 +56,7 @@ It provides:
 ## Installation & Requirements
 
 1. **Python 3.7+** (recommended)
-2. **PyQt5**
+2. **PyQt5** (For the GUI).
 3. **Windows** environment for best results (Currently all commands are Windows specific).
 
 Install dependencies:
@@ -71,7 +71,7 @@ Copy code
 
 ## Running Commander
 
-1. **Clone** or **copy** the Commander files (including `commander.py`, `shortcuts.json`, etc.) to a folder.
+1. **Clone** or **copy** the Commander files (including `main.py`, `shortcuts.json`, etc.) to a folder.
 2. **Open** a terminal or command prompt in that folder.
 3. **Launch**:
     
@@ -79,7 +79,7 @@ Copy code
     
     Copy code
     
-    `commander.py`
+=======
     
 4. The Commander window appears. You’ll see:
     - A **search bar** (with a theme toggle switch).
@@ -156,9 +156,9 @@ If you want a **single-file `.exe`**:
     
     Copy code
     
-    `pyinstaller --onefile commander.py`
+    `pyinstaller --onefile main.py`
     
-3. It creates `dist/commander.exe`. Put `shortcuts.json` (and any `.ps1` scripts you need) **beside** that `.exe`.
+3. It creates `dist/main.exe`. Put `shortcuts.json` (and any `.ps1` scripts you need) **beside** that `.exe`.
 
 ---
 
