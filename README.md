@@ -56,8 +56,8 @@ It provides:
 ## Installation & Requirements
 
 1. **Python 3.7+** (recommended)
-2. **PyQt5** or **PySide2** library installed (the code examples typically use PyQt5).
-3. **Windows** environment for best results (many commands are Windows-specific).
+2. **PyQt5**
+3. **Windows** environment for best results (Currently all commands are Windows specific).
 
 Install dependencies:
 
@@ -66,8 +66,6 @@ bash
 Copy code
 
 `pip install pyqt5`
-
-_(If using PySide2, adapt imports accordingly.)_
 
 ---
 
@@ -81,7 +79,7 @@ _(If using PySide2, adapt imports accordingly.)_
     
     Copy code
     
-    `python commander.py`
+    `commander.py`
     
 4. The Commander window appears. You’ll see:
     - A **search bar** (with a theme toggle switch).
