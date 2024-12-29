@@ -22,6 +22,17 @@
       "group": "Startup Tools"
     },
     {
+      "name": "Speed Test",
+      "command": "powershell -Command & {Invoke-WebRequest -Uri \"https://www.speedtest.net/\" -UseBasicParsing}",
+      "description": "Performs a basic speed test by accessing the SpeedTest website.",
+      "tags": [
+        "network",
+        "speed",
+        "test"
+      ],
+      "category": "Networking"
+    },
+    {
       "name": "IPConfig",
       "command": "ipconfig /all",
       "description": "Displays detailed network configuration.",
@@ -360,7 +371,8 @@
       "tags": [
         "pihole",
         "update",
-        "ssh"
+        "ssh",
+        "server"
       ],
       "category": "BAT",
       "requires_input": false
@@ -385,6 +397,45 @@
       "tags": [],
       "category": "",
       "requires_input": false
+    },
+    {
+      "name": "Copy Files to Remote Server",
+      "command": "scp {file target} {login@IP} {Directory Target}",
+      "description": "Uses SCP to copy files securely to a remote server",
+      "tags": [
+        "copy",
+        "remote",
+        "server",
+        "scp"
+      ],
+      "category": "Networking",
+      "requires_input": true
+    },
+    {
+      "name": "Reboot to BIOS/UEFI",
+      "command": "shutdown /r /fw /t 0",
+      "description": "Restarts the computer immediately to BIOS/UEFI",
+      "tags": [
+        "troubleshooting",
+        "restart",
+        "bios",
+        "reset"
+      ],
+      "category": "System Management",
+      "requires_input": false
+    },
+    {
+      "name": "Encrypt a Folder",
+      "command": "cipher /e /s:{path}",
+      "description": "Encrypts a directory and all contents",
+      "tags": [
+        "files",
+        "folder",
+        "encrypt",
+        "cypher"
+      ],
+      "category": "System Management",
+      "requires_input": true
     }
   ],
   "settings": {

@@ -4,6 +4,7 @@ import os
 import subprocess
 import ctypes
 import re
+import shlex
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -675,7 +676,7 @@ class Commander(QMainWindow):
     def run_selected_command(self):
         selected_items = self.table.selectedItems()
         if not selected_items:
-            return  # no selection
+            return  # No selection
 
         row = selected_items[0].row()
         shortcut, original_index = self.displayed_pairs[row]
@@ -683,7 +684,7 @@ class Commander(QMainWindow):
         command = shortcut.get("command", "").strip()
         requires_input = shortcut.get("requires_input", False)
 
-        # If it has placeholders, handle them
+        # 1) Placeholder handling
         if requires_input:
             placeholders = re.findall(r"{(.*?)}", command)
             if placeholders:
@@ -692,22 +693,51 @@ class Commander(QMainWindow):
                     if not val:
                         self.info_label.setText("Command cancelled or no input provided.")
                         return
+                    # Replace placeholders
                     command = command.replace(f"{{{ph}}}", val)
 
-        # Determine if it's PowerShell, PS1, .exe, or default to cmd
-        if command.lower().endswith(".exe"):
-            # Just run it via subprocess
-            full_cmd = [command]
-        elif command.lower().startswith("powershell") or command.lower().endswith(".ps1"):
-            full_cmd = ["powershell.exe", "-NoExit", "-Command", command]
-        else:
-            full_cmd = ["cmd.exe", "/k", command]
-
+        # 2) Parse the final command string into tokens with shlex
         try:
-            subprocess.Popen(full_cmd, shell=True)
-        except Exception as e:
-            self.info_label.setText(f"Error executing: {e}")
+            tokens = shlex.split(command)
+        except ValueError as e:
+            # If there's a quoting error, or user typed something unparseable
+            self.info_label.setText(f"Shlex parse error: {e}")
+            return
 
+        if not tokens:
+            self.info_label.setText("No command tokens found.")
+            return
+
+        # For debugging: print(tokens)
+        print("Parsed tokens:", tokens)
+
+        # 3) Decide how to run
+        first_token_lower = tokens[0].lower()
+
+        # A) If first token ends with .exe, run it directly
+        if first_token_lower.endswith(".exe"):
+            full_cmd = tokens  # e.g. ["E:\\HwInfo64.exe", "--someArg"]
+        # B) If first token is powershell.exe or second token is .ps1, run powershell
+        elif first_token_lower.startswith("powershell") or (len(tokens) > 0 and tokens[0].lower().endswith(".ps1")):
+            # If user typed "powershell.exe ..." => just use tokens as-is
+            full_cmd = tokens
+            # If you want to enforce something like "powershell.exe -NoExit", you can insert tokens here
+        elif (len(tokens) > 1 and tokens[1].lower().endswith(".ps1")):
+            # e.g. user typed "powershell -File something.ps1"
+            full_cmd = tokens
+        else:
+            # C) Default: pass tokens to cmd /k
+            # i.e. run cmd, /k, and then your tokens as arguments
+            full_cmd = ["cmd.exe", "/k"] + tokens
+
+        print("Final cmd to execute:", full_cmd)
+
+        # 4) Execute
+        try:
+            subprocess.Popen(full_cmd, shell=False)
+        except Exception as e:
+            print(f"Error executing command: {full_cmd}, Error: {e}")
+            self.info_label.setText(f"Error executing: {e}")
 
     def prompt_for_variable(self, placeholder_label: str = "value"):
         text, ok = QInputDialog.getText(
