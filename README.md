@@ -177,6 +177,10 @@ Feel free to open a PR or share improvements:
 - More advanced search or category logic.
 - Additional shells (e.g. WSL?).
 - Integration with external tools or an embedded console approach.
+- Much more robust handling for .exe creation with better instructions
+- Groups that can run multiple commands at a time
+- Need more ideas for great commands to add to default JSON
+- Resizing columns correctly so long commands don't take up the whole window
 
 ---
 
