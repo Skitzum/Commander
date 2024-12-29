@@ -197,18 +197,13 @@ QCheckBox::indicator:checked:hover {
 # Set path to Json file
 ###############################################################################
 
-def resource_path(relative_path: str) -> str:
-    """
-    Get the absolute path to a resource, whether we are running in dev (.__file__) or a PyInstaller bundle (._MEIPASS).
-    """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS.
-        base_path = sys._MEIPASS
-    except AttributeError:
-        # We are not bundled, so just use the directory of this file.
-        base_path = os.path.dirname(os.path.abspath(__file__))
-
-    return os.path.join(base_path, relative_path)
+def get_app_folder():
+    if getattr(sys, 'frozen', False):
+        # Running in a PyInstaller bundle
+        return os.path.dirname(sys.executable)
+    else:
+        # Running in normal Python
+        return os.path.dirname(os.path.abspath(__file__))
 
 ###############################################################################
 # Theme toggle switch
@@ -304,7 +299,7 @@ def relaunch_as_admin():
 class Commander(QMainWindow):
     def __init__(self, json_path="shortcuts.json"):
         super().__init__()
-        self.json_path = resource_path("shortcuts.json")
+        self.json_path = os.path.join(get_app_folder(), "shortcuts.json")
         self.shortcuts_data = []
 
         # This new list will store (shortcut, original_index) for the currently displayed table rows
