@@ -1,16 +1,18 @@
 import sys
-import json
 import os
 import subprocess
 import ctypes
 import re
 import shlex
+import sqlite3
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication,
+    QMenuBar,
     QMainWindow,
     QWidget,
+    QAction,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
@@ -31,7 +33,8 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QCheckBox,
     QListWidget,
-    QSplitter
+    QSplitter,
+    QMenu
 )
 
 ###############################################################################
@@ -193,18 +196,18 @@ QCheckBox::indicator:checked:hover {
 }
 """
 
-
 ###############################################################################
 # Set path to Json file
 ###############################################################################
 
 def get_app_folder():
     if getattr(sys, 'frozen', False):
-        # Running in a PyInstaller bundle
         return os.path.dirname(sys.executable)
     else:
-        # Running in normal Python
         return os.path.dirname(os.path.abspath(__file__))
+
+def get_database_path():
+    return os.path.join(get_app_folder(), "commander.db")
 
 ###############################################################################
 # Theme toggle switch
@@ -300,7 +303,6 @@ def relaunch_as_admin():
 class Commander(QMainWindow):
     def __init__(self, json_path="shortcuts.json"):
         super().__init__()
-        self.json_path = os.path.join(get_app_folder(), "shortcuts.json")
         self.shortcuts_data = []
 
         # This new list will store (shortcut, original_index) for the currently displayed table rows
@@ -327,21 +329,93 @@ class Commander(QMainWindow):
         # Initially show all shortcuts
         pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
         self.populate_table(pairs)
+    def init_menu(self):
+        # Create menu bar
+        menubar = self.menuBar()
 
+        # File menu
+        file_menu = menubar.addMenu("File")
+
+        new_action = QAction("Add Shortcut", self)
+        new_action.triggered.connect(self.on_add_shortcut)
+        file_menu.addAction(new_action)
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # Edit menu
+        edit_menu = menubar.addMenu("Edit")
+
+        add_category_action = QAction("Add Category", self)
+        # Connect to a function for adding categories
+        edit_menu.addAction(add_category_action)
+
+        remove_unused_action = QAction("Remove Unused Categories", self)
+        remove_unused_action.triggered.connect(self.remove_unused_categories)
+        edit_menu.addAction(remove_unused_action)
+
+        preferences_action = QAction("Preferences", self)
+        # Connect to a settings/preferences dialog
+        edit_menu.addAction(preferences_action)
+
+        # View menu
+        view_menu = menubar.addMenu("View")
+
+        refresh_action = QAction("Refresh", self)
+        refresh_action.triggered.connect(self.filter_table)
+        view_menu.addAction(refresh_action)
+
+        toggle_theme_action = QAction("Toggle Dark Mode", self)
+        toggle_theme_action.triggered.connect(lambda: self.theme_toggle_switch.toggle())
+        view_menu.addAction(toggle_theme_action)
+
+        # Help menu
+        help_menu = menubar.addMenu("Help")
+
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+        documentation_action = QAction("Documentation", self)
+        # Connect this to open a README file or link
+        help_menu.addAction(documentation_action)
+
+    def show_about_dialog(self):
+        QMessageBox.information(
+            self,
+            "About Commander",
+            "Commander Application\nVersion 1.0\nA handy tool for managing shortcuts.",
+            QMessageBox.Ok
+        )
     ###########################################################################
     # SIDEBAR / CATEGORY
     ###########################################################################
+    def remove_unused_categories(self):
+        """
+        Remove categories that are no longer associated with any shortcuts.
+        """
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+
+        # Delete unused categories
+        cursor.execute("""
+            DELETE FROM categories
+            WHERE id NOT IN (SELECT DISTINCT category_id FROM shortcuts)
+        """)
+
+        conn.commit()
+        conn.close()
+
     def update_category_list(self):
         """
-        Gather unique category names from self.shortcuts_data.
-        Store them in self.available_categories as a sorted list.
+        Gather unique category names from the database.
         """
-        categories = set()
-        for s in self.shortcuts_data:
-            cat = s.get("category", "").strip()
-            if cat:
-                categories.add(cat)
-        self.available_categories = sorted(categories)
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM categories ORDER BY name")
+        self.available_categories = [row[0] for row in cursor.fetchall()]
+        conn.close()
 
     def update_category_sidebar(self):
         """
@@ -349,14 +423,105 @@ class Commander(QMainWindow):
         Includes an '(All Categories)' item to reset filter.
         """
         self.category_list.clear()
-        self.update_category_list()  # Make sure self.available_categories is up to date
+        
+        # Fetch updated categories from the database
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM categories ORDER BY name")
+        categories = [row[0] for row in cursor.fetchall()]
+        conn.close()
 
         # Add an item to show all categories
         self.category_list.addItem("(All Categories)")
 
         # Add the individual categories
-        for cat in self.available_categories:
+        for cat in categories:
             self.category_list.addItem(cat)
+
+        # Enable context menu on category_list
+        self.category_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.category_list.customContextMenuRequested.connect(self.show_category_context_menu)
+
+    def show_category_context_menu(self, position):
+        """
+        Show a context menu for the category sidebar.
+        """
+        # Get the selected item
+        selected_item = self.category_list.itemAt(position)
+        if not selected_item:
+            return
+
+        # Prevent context menu for "(All Categories)"
+        if selected_item.text() == "(All Categories)":
+            return
+
+        # Create the context menu
+        menu = QMenu(self)
+        delete_action = menu.addAction("Delete Category")
+        edit_action = menu.addAction("Edit Category")
+
+        # Execute the menu
+        action = menu.exec_(self.category_list.viewport().mapToGlobal(position))
+
+        # Handle the action
+        if action == delete_action:
+            self.delete_category(selected_item.text())
+        elif action == edit_action:
+            self.edit_category(selected_item.text())
+    def delete_category(self, category_name):
+        """
+        Delete a category from the database.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete the category '{category_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            conn = sqlite3.connect(get_database_path())
+            cursor = conn.cursor()
+
+            # Delete the category
+            cursor.execute("DELETE FROM categories WHERE name = ?", (category_name,))
+
+            conn.commit()
+            conn.close()
+
+            # Refresh the sidebar
+            self.update_category_sidebar()
+            self.filter_table()
+    def edit_category(self, old_category_name):
+        """
+        Edit a category's name in the database.
+        """
+        new_category_name, ok = QInputDialog.getText(
+            self,
+            "Edit Category",
+            "Enter new category name:",
+            QLineEdit.Normal,
+            old_category_name
+        )
+
+        if ok and new_category_name.strip():
+            conn = sqlite3.connect(get_database_path())
+            cursor = conn.cursor()
+
+            # Update the category name
+            cursor.execute("""
+                UPDATE categories
+                SET name = ?
+                WHERE name = ?
+            """, (new_category_name.strip(), old_category_name))
+
+            conn.commit()
+            conn.close()
+
+            # Refresh the sidebar
+            self.update_category_sidebar()
+            self.filter_table()
 
     def on_category_selected(self, item):
         """
@@ -379,7 +544,7 @@ class Commander(QMainWindow):
     def initUI(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-
+        self.init_menu()
         # Create the main horizontal layout
         main_layout = QHBoxLayout()
         central_widget.setLayout(main_layout)
@@ -513,67 +678,74 @@ class Commander(QMainWindow):
     ###########################################################################
     def load_shortcuts(self):
         """
-        Load JSON data or create default data if file not found/invalid.
-        Sets self.current_theme from JSON if present.
+        Load shortcuts from SQLite database.
         """
-        if os.path.exists(self.json_path):
-            try:
-                with open(self.json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.shortcuts_data = data.get("shortcuts", [])
-                self.settings_data = data.get("settings", {})
-                self.current_theme = self.settings_data.get("theme", "light")
+        conn = sqlite3.connect(os.path.join(get_app_folder(), "commander.db"))
+        cursor = conn.cursor()
 
-                if not self.shortcuts_data:
-                    self.shortcuts_data = self.get_default_shortcuts()
+        # Query shortcuts with their categories and tags
+        cursor.execute("""
+            SELECT s.id, s.name, s.command, s.description, s.requires_input,
+                c.name AS category, GROUP_CONCAT(t.name) AS tags
+            FROM shortcuts s
+            LEFT JOIN categories c ON s.category_id = c.id
+            LEFT JOIN shortcut_tags st ON s.id = st.shortcut_id
+            LEFT JOIN tags t ON st.tag_id = t.id
+            GROUP BY s.id
+        """)
+        self.shortcuts_data = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "command": row[2],
+                "description": row[3],
+                "requires_input": bool(row[4]),
+                "category": row[5] or "",
+                "tags": row[6].split(",") if row[6] else []
+            }
+            for row in cursor.fetchall()
+        ]
 
-            except json.JSONDecodeError:
-                self.shortcuts_data = self.get_default_shortcuts()
-                self.settings_data = {}
-                self.current_theme = "light"
-        else:
-            self.shortcuts_data = self.get_default_shortcuts()
-            self.settings_data = {}
-            self.current_theme = "light"
-            self.save_shortcuts()
+        # Load settings (e.g., theme)
+        cursor.execute("SELECT key, value FROM settings")
+        self.settings_data = {row[0]: row[1] for row in cursor.fetchall()}
+        self.current_theme = self.settings_data.get("theme", "light")
 
-        # Apply the loaded theme right away
+        conn.close()
         self.apply_theme(self.current_theme)
 
     def save_shortcuts(self):
-        data_to_save = {
-            "shortcuts": self.shortcuts_data,
-            "settings": {
-                "theme": self.current_theme
-            }
-        }
-        with open(self.json_path, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f, indent=2)
+        """
+        Save shortcuts to the SQLite database.
+        """
+        conn = sqlite3.connect(os.path.join(get_app_folder(), "commander.db"))
+        cursor = conn.cursor()
 
-    def get_default_shortcuts(self):
-        return [
-            {
-                "name": "Ping Google",
-                "command": "ping google.com",
-                "description": "Pings Google to check network connectivity.",
-                "tags": ["network", "ping"],
-                "category": "Networking"
-            },
-            {
-                "name": "IPConfig",
-                "command": "ipconfig /all",
-                "description": "Displays detailed network configuration.",
-                "tags": ["network", "windows"],
-                "category": "Networking"
-            },
-            {
-                "name": "List Directory",
-                "command": "dir",
-                "description": "Lists files and directories in the current folder.",
-                "tags": ["directory", "windows", "files"],
-                "category": "File System"
-            }
-        ]
+        # Save shortcuts
+        for shortcut in self.shortcuts_data:
+            cursor.execute("""
+                INSERT OR REPLACE INTO shortcuts (id, name, command, description, requires_input, category_id)
+                VALUES (?, ?, ?, ?, ?, (SELECT id FROM categories WHERE name = ?))
+            """, (shortcut.get("id"), shortcut["name"], shortcut["command"], shortcut["description"],
+                shortcut["requires_input"], shortcut["category"]))
+
+            # Update tags for the shortcut
+            cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut.get("id"),))
+            for tag in shortcut["tags"]:
+                cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
+                cursor.execute("""
+                    INSERT INTO shortcut_tags (shortcut_id, tag_id)
+                    SELECT ?, id FROM tags WHERE name = ?
+                """, (shortcut.get("id"), tag))
+
+        # Save settings
+        for key, value in self.settings_data.items():
+            cursor.execute("""
+                INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+            """, (key, value))
+
+        conn.commit()
+        conn.close()
 
     ###########################################################################
     # TABLE LOGIC
@@ -753,23 +925,46 @@ class Commander(QMainWindow):
     ###########################################################################
     # ADD / EDIT / DELETE SHORTCUTS
     ###########################################################################
+    
     def on_add_shortcut(self):
-        dialog = ShortcutDialog(self)  # no shortcut_data => new mode
+        dialog = ShortcutDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             new_data = dialog.get_data()
-            self.shortcuts_data.append(new_data)
-            self.save_shortcuts()
-            # Re-filter or show all
-            current_filter = self.search_bar.text().strip()
-            if current_filter:
-                self.filter_table()
-            else:
-                pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
-                self.populate_table(pairs)
-            self.info_label.setText(f"Added new shortcut: {new_data['name']}")
+            conn = sqlite3.connect(get_database_path())
+            cursor = conn.cursor()
 
-            # Also update the sidebar (maybe new category was added)
-            self.update_category_sidebar()
+            # Ensure the category exists or create it
+            cursor.execute("""
+                INSERT OR IGNORE INTO categories (name) VALUES (?)
+            """, (new_data["category"],))
+            cursor.execute("""
+                SELECT id FROM categories WHERE name = ?
+            """, (new_data["category"],))
+            category_id = cursor.fetchone()[0]
+
+            # Insert the new shortcut
+            cursor.execute("""
+                INSERT INTO shortcuts (name, command, description, requires_input, category_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (new_data["name"], new_data["command"], new_data["description"],
+                new_data["requires_input"], category_id))
+            shortcut_id = cursor.lastrowid
+
+            # Insert tags and link them to the shortcut
+            for tag in new_data["tags"]:
+                cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
+                cursor.execute("""
+                    INSERT INTO shortcut_tags (shortcut_id, tag_id)
+                    SELECT ?, id FROM tags WHERE name = ?
+                """, (shortcut_id, tag))
+
+            conn.commit()
+            conn.close()
+
+            # Refresh the GUI
+            self.load_shortcuts()          # Reload shortcuts from the database
+            self.update_category_sidebar() # Update categories in the sidebar
+            self.filter_table()            # Refresh the table view
 
     def on_edit_shortcut(self):
         selected_items = self.table.selectedItems()
@@ -777,37 +972,56 @@ class Commander(QMainWindow):
             return
 
         table_row = selected_items[0].row()
-        if table_row < 0 or table_row >= len(self.displayed_pairs):
-            return  # safety check
-
         shortcut, original_index = self.displayed_pairs[table_row]
-        original_data = self.shortcuts_data[original_index]
-
-        dialog = ShortcutDialog(self, shortcut_data=original_data)
+        dialog = ShortcutDialog(self, shortcut_data=shortcut)
         if dialog.exec_() == QDialog.Accepted:
             updated_data = dialog.get_data()
-            self.shortcuts_data[original_index] = updated_data
-            self.save_shortcuts()
+            conn = sqlite3.connect(get_database_path())
+            cursor = conn.cursor()
 
-            # Re-filter or re-show all
-            current_filter = self.search_bar.text().strip()
-            if current_filter:
-                self.filter_table()
-            else:
-                pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
-                self.populate_table(pairs)
+            # Ensure the category exists or create it
+            cursor.execute("""
+                INSERT OR IGNORE INTO categories (name) VALUES (?)
+            """, (updated_data["category"],))
+            cursor.execute("""
+                SELECT id FROM categories WHERE name = ?
+            """, (updated_data["category"],))
+            category_id = cursor.fetchone()[0]
 
-            # Also update sidebar if the category changed
+            # Update the shortcut
+            cursor.execute("""
+                UPDATE shortcuts
+                SET name = ?, command = ?, description = ?, requires_input = ?, category_id = ?
+                WHERE id = ?
+            """, (updated_data["name"], updated_data["command"], updated_data["description"],
+                updated_data["requires_input"], category_id, shortcut["id"]))
+
+            # Update tags
+            cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut["id"],))
+            for tag in updated_data["tags"]:
+                cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
+                cursor.execute("""
+                    INSERT INTO shortcut_tags (shortcut_id, tag_id)
+                    SELECT ?, id FROM tags WHERE name = ?
+                """, (shortcut["id"], tag))
+
+            conn.commit()
+            conn.close()
+
+            # Remove unused categories and refresh the GUI
+            self.remove_unused_categories()
+            self.load_shortcuts()
             self.update_category_sidebar()
+            self.filter_table()
 
     def on_delete_shortcut(self):
         selected_items = self.table.selectedItems()
         if not selected_items:
             return
 
-        row = selected_items[0].row()
-        shortcut, original_index = self.displayed_pairs[row]
-        shortcut_name = shortcut.get("name", "")
+        table_row = selected_items[0].row()
+        shortcut, original_index = self.displayed_pairs[table_row]
+        shortcut_name = shortcut["name"]
 
         reply = QMessageBox.question(
             self,
@@ -817,20 +1031,38 @@ class Commander(QMainWindow):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self.shortcuts_data.pop(original_index)
-            self.save_shortcuts()
+            conn = sqlite3.connect(get_database_path())
+            cursor = conn.cursor()
 
-            current_filter = self.search_bar.text().strip()
-            if current_filter:
-                self.filter_table()
-            else:
-                pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
-                self.populate_table(pairs)
+            # Delete the shortcut and its relationships
+            cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut["id"],))
+            cursor.execute("DELETE FROM shortcuts WHERE id = ?", (shortcut["id"],))
 
-            # Also refresh sidebar in case we removed the last item of a category
+            conn.commit()
+            conn.close()
+
+            # Remove unused categories and refresh the GUI
+            self.remove_unused_categories()  # Call the method here
+            self.load_shortcuts()
             self.update_category_sidebar()
+            self.filter_table()
 
-            self.info_label.setText(f"Deleted shortcut: {shortcut_name}")
+    def remove_unused_tags(self):
+        """
+        Remove tags that are not associated with any shortcuts.
+        """
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+
+        # Delete unused tags
+        cursor.execute("""
+            DELETE FROM tags
+            WHERE id NOT IN (SELECT DISTINCT tag_id FROM shortcut_tags)
+        """)
+
+        conn.commit()
+        conn.close()
+
 ###############################################################################
 # Shortcut editing
 ###############################################################################
