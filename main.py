@@ -4,7 +4,9 @@ import subprocess
 import ctypes
 import re
 import shlex
+import traceback
 import sqlite3
+from datetime import datetime
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -293,7 +295,7 @@ def relaunch_as_admin():
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, sys.argv[0] + " " + params, None, 1)
         return True
     except Exception as e:
-        print("Failed to elevate:", e)
+        #print("Failed to elevate:", e)
         return False
     
 ###############################################################################
@@ -314,6 +316,8 @@ class Commander(QMainWindow):
         # Track which category is selected (None => show all)
         self.selected_category = None
 
+        self.current_sort_method = "newest"  # Default sorting method
+
         # Window Title & Initial Size
         self.setWindowTitle("Commander")
         self.setMinimumSize(800, 400)
@@ -322,13 +326,17 @@ class Commander(QMainWindow):
         # Keep track of two-step confirm state
         self.confirmation_pending = False
 
-        self.load_shortcuts()
-        self.initUI()
+        self.load_shortcuts()  # Load shortcuts and settings
+
+        self.initUI()  # Initialize the UI components, including self.table
+
         self.apply_theme(self.current_theme)  # Apply the loaded theme after UI initialization
 
         # Initially show all shortcuts
-        pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
-        self.populate_table(pairs)
+        self.displayed_pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
+        self.sort_table(self.current_sort_method)  # Sort table after initializing UI
+        self.populate_table(self.displayed_pairs)  # Populate the table
+
     def init_menu(self):
         # Create menu bar
         menubar = self.menuBar()
@@ -354,10 +362,20 @@ class Commander(QMainWindow):
         remove_unused_action = QAction("Remove Unused Categories", self)
         remove_unused_action.triggered.connect(self.remove_unused_categories)
         edit_menu.addAction(remove_unused_action)
+        
+        preferences_menu = edit_menu.addMenu("Preferences")
 
-        preferences_action = QAction("Preferences", self)
-        # Connect to a settings/preferences dialog
-        edit_menu.addAction(preferences_action)
+        sort_newest_action = QAction("Sort by Newest", self)
+        sort_newest_action.triggered.connect(lambda: self.sort_table("newest"))
+        preferences_menu.addAction(sort_newest_action)
+
+        sort_alpha_action = QAction("Sort Alphabetically", self)
+        sort_alpha_action.triggered.connect(lambda: self.sort_table("alphabetically"))
+        preferences_menu.addAction(sort_alpha_action)
+
+        sort_used_action = QAction("Sort by Most Used", self)
+        sort_used_action.triggered.connect(lambda: self.sort_table("most_used"))
+        preferences_menu.addAction(sort_used_action)
 
         # View menu
         view_menu = menubar.addMenu("View")
@@ -388,6 +406,50 @@ class Commander(QMainWindow):
             "Commander Application\nVersion 1.0\nA handy tool for managing shortcuts.",
             QMessageBox.Ok
         )
+    def sort_table(self, method):
+        #print(f"Sorting by: {method}")
+        #print(f"Displayed pairs before sort: {self.displayed_pairs}")
+
+        self.current_sort_method = method
+        self.save_sorting_preference(method)
+
+        if method == "newest":
+            sorted_pairs = sorted(
+                self.displayed_pairs,
+                key=lambda x: x[0].get("updated_at", ""),
+                reverse=True
+            )
+        elif method == "alphabetically":
+            sorted_pairs = sorted(
+                self.displayed_pairs,
+                key=lambda x: x[0].get("name", "").lower()
+            )
+        elif method == "most_used":
+            sorted_pairs = sorted(
+                self.displayed_pairs,
+                key=lambda x: x[0].get("usage_count", 0),
+                reverse=True
+            )
+        else:
+            return
+
+        #print(f"Displayed pairs after sort: {sorted_pairs}")
+        self.populate_table(sorted_pairs)
+
+    
+    def save_sorting_preference(self, method):
+        """
+        Save the current sorting preference to the database.
+        """
+        self.current_sort_method = method  # Update the tracking variable
+
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_preference', ?)
+        """, (method,))
+        conn.commit()
+        conn.close()
     ###########################################################################
     # SIDEBAR / CATEGORY
     ###########################################################################
@@ -666,27 +728,35 @@ class Commander(QMainWindow):
         """
         If 'checked' is True => 'dark' mode; otherwise => 'light'.
         """
-        if checked:
-            self.current_theme = "dark"
-        else:
-            self.current_theme = "light"
+        self.current_theme = "dark" if checked else "light"
+        #print(f"Theme toggled. New theme: {self.current_theme}")
         self.apply_theme(self.current_theme)
-        self.save_shortcuts()
+        self.save_theme_preference()  # Save the new preference
+
+    def save_theme_preference(self):
+        """
+        Save the current theme preference to the database.
+        """
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO settings (key, value) VALUES ('theme', ?)
+        """, (self.current_theme,))
+        conn.commit()
+        conn.close()
+        #print(f"Theme preference saved: {self.current_theme}")
 
     ###########################################################################
     # LOADING / SAVING
     ###########################################################################
     def load_shortcuts(self):
-        """
-        Load shortcuts from SQLite database.
-        """
-        conn = sqlite3.connect(os.path.join(get_app_folder(), "commander.db"))
+        conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
 
-        # Query shortcuts with their categories and tags
         cursor.execute("""
             SELECT s.id, s.name, s.command, s.description, s.requires_input,
-                c.name AS category, GROUP_CONCAT(t.name) AS tags
+                c.name AS category, GROUP_CONCAT(t.name) AS tags,
+                s.updated_at, s.usage_count
             FROM shortcuts s
             LEFT JOIN categories c ON s.category_id = c.id
             LEFT JOIN shortcut_tags st ON s.id = st.shortcut_id
@@ -701,18 +771,21 @@ class Commander(QMainWindow):
                 "description": row[3],
                 "requires_input": bool(row[4]),
                 "category": row[5] or "",
-                "tags": row[6].split(",") if row[6] else []
+                "tags": row[6].split(",") if row[6] else [],
+                "updated_at": row[7] or "",
+                "usage_count": int(row[8]) if row[8] else 0
             }
             for row in cursor.fetchall()
         ]
 
-        # Load settings (e.g., theme)
         cursor.execute("SELECT key, value FROM settings")
         self.settings_data = {row[0]: row[1] for row in cursor.fetchall()}
         self.current_theme = self.settings_data.get("theme", "light")
-
+        self.current_sort_method = self.settings_data.get("sort_preference", "newest")
         conn.close()
-        self.apply_theme(self.current_theme)
+
+        #print(f"Shortcuts loaded: {self.shortcuts_data}")
+        #print(f"Settings loaded: {self.settings_data}")
 
     def save_shortcuts(self):
         """
@@ -856,7 +929,7 @@ class Commander(QMainWindow):
         command = shortcut.get("command", "").strip()
         requires_input = shortcut.get("requires_input", False)
 
-        # 1) Placeholder handling
+        # Placeholder handling
         if requires_input:
             placeholders = re.findall(r"{(.*?)}", command)
             if placeholders:
@@ -865,62 +938,62 @@ class Commander(QMainWindow):
                     if not val:
                         self.info_label.setText("Command cancelled or no input provided.")
                         return
-                    # Replace placeholders
                     command = command.replace(f"{{{ph}}}", val)
 
-        # 2) Parse the final command string into tokens with shlex
+        # Execute the command
         try:
-            tokens = shlex.split(command)
-        except ValueError as e:
-            # If there's a quoting error, or user typed something unparseable
-            self.info_label.setText(f"Shlex parse error: {e}")
-            return
-
-        if not tokens:
-            self.info_label.setText("No command tokens found.")
-            return
-
-        # For debugging: print(tokens)
-        print("Parsed tokens:", tokens)
-
-        # 3) Decide how to run
-        first_token_lower = tokens[0].lower()
-
-        # A) If first token ends with .exe, run it directly
-        if first_token_lower.endswith(".exe"):
-            full_cmd = tokens  # e.g. ["E:\\HwInfo64.exe", "--someArg"]
-        # B) If first token is powershell.exe or second token is .ps1, run powershell
-        elif first_token_lower.startswith("powershell") or (len(tokens) > 0 and tokens[0].lower().endswith(".ps1")):
-            # If user typed "powershell.exe ..." => just use tokens as-is
-            full_cmd = tokens
-            # If you want to enforce something like "powershell.exe -NoExit", you can insert tokens here
-        elif (len(tokens) > 1 and tokens[1].lower().endswith(".ps1")):
-            # e.g. user typed "powershell -File something.ps1"
-            full_cmd = tokens
-        else:
-            # C) Default: pass tokens to cmd /k
-            # i.e. run cmd, /k, and then your tokens as arguments
-            full_cmd = ["cmd.exe", "/k"] + tokens
-
-        print("Final cmd to execute:", full_cmd)
-
-        # 4) Execute
-        try:
-            subprocess.Popen(full_cmd, shell=False)
+            subprocess.Popen(shlex.split(command), shell=False)
         except Exception as e:
-            print(f"Error executing command: {full_cmd}, Error: {e}")
+            #print(f"Error executing command: {e}")
             self.info_label.setText(f"Error executing: {e}")
+            return
 
-    def prompt_for_variable(self, placeholder_label: str = "value"):
-        text, ok = QInputDialog.getText(
-            self,
-            "Input Required",
-            f"Enter {placeholder_label}:",
-            QLineEdit.Normal
-        )
-        if ok and text.strip():
-            return text.strip()
-        return None
+        # Update database
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+
+        # Update usage_count and updated_at in the database
+        cursor.execute("""
+            UPDATE shortcuts
+            SET usage_count = usage_count + 1,
+                updated_at = ?
+            WHERE id = ?
+        """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), shortcut["id"]))
+
+        conn.commit()
+        conn.close()
+
+        # Update shortcut in memory
+        # Update shortcut in memory
+        shortcut["usage_count"] += 1
+        shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Proper timestamp
+
+        # Refresh the specific row in the table
+        self.update_table_row(row, shortcut)
+
+        # Automatically sort the table after updates
+        self.sort_table(self.current_sort_method)  # Use a tracked sort method
+
+    def update_table_row(self, row, shortcut):
+        """
+        Update a single table row with the latest shortcut data.
+        """
+        self.table.item(row, 0).setText(shortcut.get("name", ""))
+        self.table.item(row, 1).setText(shortcut.get("command", ""))
+        self.table.item(row, 2).setText(", ".join(shortcut.get("tags", [])))
+        self.table.item(row, 3).setText(shortcut.get("category", ""))
+        self.table.resizeColumnsToContents()
+
+        def prompt_for_variable(self, placeholder_label: str = "value"):
+            text, ok = QInputDialog.getText(
+                self,
+                "Input Required",
+                f"Enter {placeholder_label}:",
+                QLineEdit.Normal
+            )
+            if ok and text.strip():
+                return text.strip()
+            return None
 
     ###########################################################################
     # ADD / EDIT / DELETE SHORTCUTS
@@ -1157,60 +1230,47 @@ class ShortcutDialog(QDialog):
     def get_data(self):
         return self.result_data
 def main():
-    """
-    Main entry point. Attempt to re-run as admin if not already.
-    Then run the PyQt application.
-    """
-    # Attempt to relaunch as admin
-    if relaunch_as_admin():
-        # If relaunch_as_admin() returned True, we've triggered a new elevated process.
-        # So this current (non-admin) process should exit.
-        sys.exit(0)
+    try:
+        app = QApplication(sys.argv)
+        app.setStyle(QStyleFactory.create("Fusion"))
+        app.setStyleSheet("""
+            QMainWindow {
+                background-color: #f0f0f0;
+            }
+            QLabel {
+                font-size: 14px;
+            }
+            QLineEdit {
+                font-size: 14px;
+                padding: 4px;
+            }
+            QTableWidget {
+                background-color: #ffffff;
+                gridline-color: #cccccc;
+                font-size: 14px;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d7;
+                color: #ffffff;
+            }
+            QPushButton {
+                font-size: 14px;
+                padding: 6px 12px;
+            }
+            QToolTip {
+                background-color: #222222;
+                color: #ffffff;
+                border: 1px solid #aaaaaa;
+                padding: 5px;
+                font-size: 12px;
+            }
+        """)
 
-    # Otherwise, continue as is (already admin or failed to elevate).
-    app = QApplication(sys.argv)
-
-    # Use a more modern built-in style
-    app.setStyle(QStyleFactory.create("Fusion"))
-
-    # A basic Fusion stylesheet
-    app.setStyleSheet("""
-        QMainWindow {
-            background-color: #f0f0f0;
-        }
-        QLabel {
-            font-size: 14px;
-        }
-        QLineEdit {
-            font-size: 14px;
-            padding: 4px;
-        }
-        QTableWidget {
-            background-color: #ffffff;
-            gridline-color: #cccccc;
-            font-size: 14px;
-        }
-        QTableWidget::item:selected {
-            background-color: #0078d7;
-            color: #ffffff;
-        }
-        QPushButton {
-            font-size: 14px;
-            padding: 6px 12px;
-        }
-        QToolTip {
-            background-color: #222222;
-            color: #ffffff;
-            border: 1px solid #aaaaaa;
-            padding: 5px;
-            font-size: 12px;
-        }
-    """)
-
-    window = Commander()
-    window.show()
-    sys.exit(app.exec_())
-
-
+        window = Commander()
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        traceback.print_exc()  # Log full traceback
+       #print(f"Unhandled exception: {e}")
 if __name__ == "__main__":
     main()
