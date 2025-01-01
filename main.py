@@ -8,7 +8,8 @@ import traceback
 import sqlite3
 from datetime import datetime
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtWidgets import (
     QApplication,
     QMenuBar,
@@ -36,7 +37,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QListWidget,
     QSplitter,
-    QMenu
+    QMenu,
 )
 
 ###############################################################################
@@ -356,13 +357,12 @@ class Commander(QMainWindow):
         edit_menu = menubar.addMenu("Edit")
 
         add_category_action = QAction("Add Category", self)
-        # Connect to a function for adding categories
         edit_menu.addAction(add_category_action)
 
         remove_unused_action = QAction("Remove Unused Categories", self)
         remove_unused_action.triggered.connect(self.remove_unused_categories)
         edit_menu.addAction(remove_unused_action)
-        
+
         preferences_menu = edit_menu.addMenu("Preferences")
 
         sort_newest_action = QAction("Sort by Newest", self)
@@ -396,9 +396,24 @@ class Commander(QMainWindow):
         help_menu.addAction(about_action)
 
         documentation_action = QAction("Documentation", self)
-        # Connect this to open a README file or link
+        documentation_action.triggered.connect(self.open_documentation)
         help_menu.addAction(documentation_action)
 
+    def open_documentation(self):
+        """
+        Open the README.md file located in the same directory as the script.
+        """
+        readme_path = os.path.join(get_app_folder(), "README.md")
+        if os.path.exists(readme_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(readme_path))
+        else:
+            QMessageBox.warning(
+                self,
+                "Documentation Not Found",
+                "The README.md file could not be found in the application directory.",
+                QMessageBox.Ok
+            )
+            
     def show_about_dialog(self):
         QMessageBox.information(
             self,
@@ -489,7 +504,12 @@ class Commander(QMainWindow):
         # Fetch updated categories from the database
         conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM categories ORDER BY name")
+        cursor.execute("""
+            SELECT name
+            FROM categories
+            WHERE name IS NOT NULL AND TRIM(name) != ''
+            ORDER BY name
+        """)
         categories = [row[0] for row in cursor.fetchall()]
         conn.close()
 
@@ -753,8 +773,9 @@ class Commander(QMainWindow):
         conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
 
+        # Query shortcuts with categories and tags
         cursor.execute("""
-            SELECT s.id, s.name, s.command, s.description, s.requires_input,
+            SELECT s.id, s.name, s.command, s.description,
                 c.name AS category, GROUP_CONCAT(t.name) AS tags,
                 s.updated_at, s.usage_count
             FROM shortcuts s
@@ -769,15 +790,16 @@ class Commander(QMainWindow):
                 "name": row[1],
                 "command": row[2],
                 "description": row[3],
-                "requires_input": bool(row[4]),
-                "category": row[5] or "",
-                "tags": row[6].split(",") if row[6] else [],
-                "updated_at": row[7] or "",
-                "usage_count": int(row[8]) if row[8] else 0
+                "requires_input": bool(re.search(r"{(.*?)}", row[2])),  # Auto-detect placeholders
+                "category": row[4] or "",
+                "tags": row[5].split(",") if row[5] else [],
+                "updated_at": row[6] or "",
+                "usage_count": int(row[7]) if row[7] else 0
             }
             for row in cursor.fetchall()
         ]
 
+        # Load settings
         cursor.execute("SELECT key, value FROM settings")
         self.settings_data = {row[0]: row[1] for row in cursor.fetchall()}
         self.current_theme = self.settings_data.get("theme", "light")
@@ -797,10 +819,10 @@ class Commander(QMainWindow):
         # Save shortcuts
         for shortcut in self.shortcuts_data:
             cursor.execute("""
-                INSERT OR REPLACE INTO shortcuts (id, name, command, description, requires_input, category_id)
-                VALUES (?, ?, ?, ?, ?, (SELECT id FROM categories WHERE name = ?))
+                INSERT OR REPLACE INTO shortcuts (id, name, command, description, category_id)
+                VALUES (?, ?, ?, ?, (SELECT id FROM categories WHERE name = ?))
             """, (shortcut.get("id"), shortcut["name"], shortcut["command"], shortcut["description"],
-                shortcut["requires_input"], shortcut["category"]))
+                shortcut["category"]))
 
             # Update tags for the shortcut
             cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut.get("id"),))
@@ -921,59 +943,105 @@ class Commander(QMainWindow):
     def run_selected_command(self):
         selected_items = self.table.selectedItems()
         if not selected_items:
-            return  # No selection
+            print("No item selected.")
+            self.info_label.setText("No item selected.")
+            return
 
         row = selected_items[0].row()
+
+        # Safeguard: Verify row alignment with displayed_pairs
+        if row >= len(self.displayed_pairs):
+            print("Invalid row selection. Out of range.")
+            self.info_label.setText("Invalid selection.")
+            return
+
         shortcut, original_index = self.displayed_pairs[row]
 
+        # Validate command
         command = shortcut.get("command", "").strip()
-        requires_input = shortcut.get("requires_input", False)
+        if not command:
+            self.info_label.setText("No command to execute.")
+            print("No command provided.")
+            return
 
-        # Placeholder handling
-        if requires_input:
-            placeholders = re.findall(r"{(.*?)}", command)
-            if placeholders:
-                for ph in placeholders:
-                    val = self.prompt_for_variable(ph)
-                    if not val:
-                        self.info_label.setText("Command cancelled or no input provided.")
-                        return
-                    command = command.replace(f"{{{ph}}}", val)
+        # Detect and handle placeholders
+        placeholders = re.findall(r"{(.*?)}", command)
+        if placeholders:
+            print(f"Detected placeholders: {placeholders}")
+            for ph in placeholders:
+                val = self.prompt_for_variable(ph)
+                if not val:  # Handle missing input
+                    self.info_label.setText(f"Execution canceled. Missing value for {ph}.")
+                    print(f"Command canceled due to missing value for placeholder: {ph}")
+                    return
+                # Replace the placeholder with the user-provided value
+                command = command.replace(f"{{{ph}}}", val)
 
-        # Execute the command
+        # Re-validate command to check for unresolved placeholders
+        if "{" in command or "}" in command:
+            self.info_label.setText("Invalid command: Unresolved placeholders remain.")
+            print("Invalid or unresolved placeholders remain in command:", command)
+            return
+
+        # Prepend the appropriate executor based on the file type
+        if command.endswith(".bat"):
+            command = f"cmd.exe /c \"{command}\""
+        elif command.endswith(".ps1"):
+            command = f"powershell -ExecutionPolicy Bypass -File \"{command}\""
+        elif command.endswith(".exe"):
+            command = f"\"{command}\""  # Enclose in quotes for safety
+
+        # Execute the command interactively
+        interactive_command = f"start cmd /k {command}"  # Use /k to keep the window open
+        print(f"Final interactive command: {interactive_command}")
+
         try:
-            subprocess.Popen(shlex.split(command), shell=False)
+            subprocess.Popen(interactive_command, shell=True)
+            print(f"Executing: {interactive_command}")
         except Exception as e:
-            #print(f"Error executing command: {e}")
+            print(f"Error executing command: {e}")
             self.info_label.setText(f"Error executing: {e}")
             return
 
-        # Update database
+        # Update usage count and timestamp in the database
         conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
-
-        # Update usage_count and updated_at in the database
         cursor.execute("""
             UPDATE shortcuts
             SET usage_count = usage_count + 1,
                 updated_at = ?
             WHERE id = ?
         """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), shortcut["id"]))
+        conn.commit()
+        conn.close()
 
+        # Update the in-memory shortcut data
+        shortcut["usage_count"] += 1
+        shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.update_table_row(row, shortcut)
+
+        # Automatically sort the table after updates
+        self.sort_table(self.current_sort_method)
+
+    def update_shortcut_usage(self, shortcut, row):
+        # Update database
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE shortcuts
+            SET usage_count = usage_count + 1,
+                updated_at = ?
+            WHERE id = ?
+        """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), shortcut["id"]))
         conn.commit()
         conn.close()
 
         # Update shortcut in memory
-        # Update shortcut in memory
         shortcut["usage_count"] += 1
-        shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Proper timestamp
-
-        # Refresh the specific row in the table
+        shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.update_table_row(row, shortcut)
-
-        # Automatically sort the table after updates
-        self.sort_table(self.current_sort_method)  # Use a tracked sort method
-
+        self.sort_table(self.current_sort_method)
+        
     def update_table_row(self, row, shortcut):
         """
         Update a single table row with the latest shortcut data.
@@ -984,16 +1052,29 @@ class Commander(QMainWindow):
         self.table.item(row, 3).setText(shortcut.get("category", ""))
         self.table.resizeColumnsToContents()
 
-        def prompt_for_variable(self, placeholder_label: str = "value"):
-            text, ok = QInputDialog.getText(
-                self,
-                "Input Required",
-                f"Enter {placeholder_label}:",
-                QLineEdit.Normal
-            )
-            if ok and text.strip():
-                return text.strip()
-            return None
+    def prompt_for_variable(self, placeholder_label: str = "value"):
+        """
+        Prompts the user for input to replace a placeholder.
+        """
+        text, ok = QInputDialog.getText(
+            self,
+            "Input Required",
+            f"Enter {placeholder_label}:",
+            QLineEdit.Normal
+        )
+        if ok and text.strip():
+            # Validate numeric input for specific placeholders
+            if placeholder_label == "time":
+                if not text.strip().isdigit():
+                    QMessageBox.warning(
+                        self,
+                        "Invalid Input",
+                        "Please enter a valid numeric value for time.",
+                        QMessageBox.Ok
+                    )
+                    return None
+            return text.strip()
+        return None
 
     ###########################################################################
     # ADD / EDIT / DELETE SHORTCUTS
@@ -1003,6 +1084,7 @@ class Commander(QMainWindow):
         dialog = ShortcutDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             new_data = dialog.get_data()
+
             conn = sqlite3.connect(get_database_path())
             cursor = conn.cursor()
 
@@ -1015,15 +1097,15 @@ class Commander(QMainWindow):
             """, (new_data["category"],))
             category_id = cursor.fetchone()[0]
 
-            # Insert the new shortcut
+            # Insert the new shortcut, auto-detect if placeholders exist
+            requires_input = bool(re.search(r"{(.*?)}", new_data["command"]))  # Detect placeholders dynamically
             cursor.execute("""
-                INSERT INTO shortcuts (name, command, description, requires_input, category_id)
-                VALUES (?, ?, ?, ?, ?)
-            """, (new_data["name"], new_data["command"], new_data["description"],
-                new_data["requires_input"], category_id))
-            shortcut_id = cursor.lastrowid
+                INSERT INTO shortcuts (name, command, description, category_id)
+                VALUES (?, ?, ?, ?)
+            """, (new_data["name"], new_data["command"], new_data["description"], category_id))
 
             # Insert tags and link them to the shortcut
+            shortcut_id = cursor.lastrowid
             for tag in new_data["tags"]:
                 cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
                 cursor.execute("""
@@ -1034,10 +1116,10 @@ class Commander(QMainWindow):
             conn.commit()
             conn.close()
 
-            # Refresh the GUI
-            self.load_shortcuts()          # Reload shortcuts from the database
-            self.update_category_sidebar() # Update categories in the sidebar
-            self.filter_table()            # Refresh the table view
+            # Refresh the UI
+            self.load_shortcuts()
+            self.update_category_sidebar()
+            self.filter_table()
 
     def on_edit_shortcut(self):
         selected_items = self.table.selectedItems()
@@ -1047,8 +1129,10 @@ class Commander(QMainWindow):
         table_row = selected_items[0].row()
         shortcut, original_index = self.displayed_pairs[table_row]
         dialog = ShortcutDialog(self, shortcut_data=shortcut)
+
         if dialog.exec_() == QDialog.Accepted:
             updated_data = dialog.get_data()
+
             conn = sqlite3.connect(get_database_path())
             cursor = conn.cursor()
 
@@ -1061,15 +1145,15 @@ class Commander(QMainWindow):
             """, (updated_data["category"],))
             category_id = cursor.fetchone()[0]
 
-            # Update the shortcut
+            # Update the shortcut, auto-detect if placeholders exist
+            requires_input = bool(re.search(r"{(.*?)}", updated_data["command"]))  # Detect placeholders dynamically
             cursor.execute("""
                 UPDATE shortcuts
-                SET name = ?, command = ?, description = ?, requires_input = ?, category_id = ?
+                SET name = ?, command = ?, description = ?, category_id = ?
                 WHERE id = ?
-            """, (updated_data["name"], updated_data["command"], updated_data["description"],
-                updated_data["requires_input"], category_id, shortcut["id"]))
+            """, (updated_data["name"], updated_data["command"], updated_data["description"], category_id, shortcut["id"]))
 
-            # Update tags
+            # Update tags for the shortcut
             cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut["id"],))
             for tag in updated_data["tags"]:
                 cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
@@ -1081,8 +1165,8 @@ class Commander(QMainWindow):
             conn.commit()
             conn.close()
 
-            # Remove unused categories and refresh the GUI
-            self.remove_unused_categories()
+            # Refresh the UI
+            self.remove_unused_categories()  # Remove unused categories
             self.load_shortcuts()
             self.update_category_sidebar()
             self.filter_table()
@@ -1171,10 +1255,6 @@ class ShortcutDialog(QDialog):
         self.category_edit = QLineEdit()
         layout.addRow(QLabel("Category:"), self.category_edit)
 
-        # Requires Input? checkbox
-        self.requires_input_checkbox = QCheckBox("Requires user input?")
-        layout.addRow(QLabel("Input Needed:"), self.requires_input_checkbox)
-
         # Link script button if desired
         self.link_file_button = QPushButton("Link .exe, .bat, or .ps1")
         self.link_file_button.clicked.connect(self.on_link_file)
@@ -1188,9 +1268,6 @@ class ShortcutDialog(QDialog):
             tag_list = shortcut_data.get("tags", [])
             self.tags_edit.setText(", ".join(tag_list))
             self.category_edit.setText(shortcut_data.get("category", ""))
-
-            # Load the requires_input checkbox
-            self.requires_input_checkbox.setChecked(shortcut_data.get("requires_input", False))
 
         # OK / Cancel
         self.ok_button = QPushButton("OK")
@@ -1215,20 +1292,37 @@ class ShortcutDialog(QDialog):
         # Convert comma-separated tags to a list
         tags_list = [tag.strip() for tag in tags_str.split(",")] if tags_str else []
 
-        requires_input = self.requires_input_checkbox.isChecked()
-
+        # No need for requires_input; it will be determined dynamically later
         self.result_data = {
             "name": name,
             "command": command,
             "description": description,
             "tags": tags_list,
-            "category": category,
-            "requires_input": requires_input
+            "category": category
         }
         self.accept()
 
     def get_data(self):
-        return self.result_data
+        """
+        Returns the final data from the dialog as a dict.
+        """
+        name = self.name_edit.text().strip()
+        command = self.command_edit.text().strip()
+        description = self.description_edit.text().strip()
+        tags_str = self.tags_edit.text().strip()
+        category = self.category_edit.text().strip()
+
+        # Convert comma-separated tags to a list
+        tags_list = [tag.strip() for tag in tags_str.split(",")] if tags_str else []
+
+        return {
+            "name": name,
+            "command": command,
+            "description": description,
+            "tags": tags_list,
+            "category": category,
+        }
+
 def main():
     try:
         app = QApplication(sys.argv)
