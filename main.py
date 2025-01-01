@@ -1038,17 +1038,20 @@ class Commander(QMainWindow):
     def filter_table(self):
         """
         Filters the table based on search text or selected category.
+        Ensures the search resets and reevaluates with each text update.
         """
+        # Retrieve the filter text
         filter_text = self.search_bar.text().lower().strip()
         pairs = []
 
-        for shortcut, original_index in self.displayed_pairs:  # Use displayed_pairs for filtering
-            # Filter by selected category
+        # Reset to all items in the current category (or all if none selected)
+        for i, shortcut in enumerate(self.shortcuts_data):  # Use shortcuts_data for a full reset
+            # Filter by selected category first
             if self.selected_category:
                 if shortcut.get("category", "") != self.selected_category:
                     continue
 
-            # Filter by search text
+            # Apply search filter if there's text
             if filter_text:
                 combined_text = " ".join([
                     shortcut.get("name", ""),
@@ -1059,12 +1062,14 @@ class Commander(QMainWindow):
                 if filter_text not in combined_text:
                     continue
 
-            pairs.append((shortcut, original_index))
+            pairs.append((shortcut, i))
 
-        # Debug: Check filtered data
-        print(f"Filtered {len(pairs)} items. First item: {pairs[0][0].get('name', '') if pairs else 'None'}")
+        # Debug: Check the filtering process
+        #print(f"Filtered {len(pairs)} items for search '{filter_text}'. First item: {pairs[0][0].get('name', '') if pairs else 'None'}")
 
+        # Populate the table with the filtered results
         self.populate_table(pairs)
+
 
     ###########################################################################
     # TABLE SELECTION (Enabling Execute, Edit, Delete)
