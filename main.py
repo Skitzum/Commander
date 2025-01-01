@@ -395,7 +395,7 @@ class Commander(QMainWindow):
         view_menu = menubar.addMenu("View")
 
         refresh_action = QAction("Refresh", self)
-        refresh_action.triggered.connect(self.filter_table)
+        refresh_action.triggered.connect(self.refresh_table)  # Fix: Use self.refresh_table instead of self.filter_table
         view_menu.addAction(refresh_action)
 
         toggle_theme_action = QAction("Toggle Dark Mode", self)
@@ -412,6 +412,7 @@ class Commander(QMainWindow):
         documentation_action = QAction("Documentation", self)
         documentation_action.triggered.connect(self.open_documentation)
         help_menu.addAction(documentation_action)
+
 
     def open_documentation(self):
         """
@@ -436,33 +437,44 @@ class Commander(QMainWindow):
             QMessageBox.Ok
         )
     def sort_table(self, method):
-        #print(f"Sorting by: {method}")
-        #print(f"Displayed pairs before sort: {self.displayed_pairs}")
+        """
+        Sorts the table based on the selected method.
+        """
+        print(f"Sorting table using method: {method}")
+        self.current_sort_method = method  # Track the current sorting method
+        self.save_sorting_preference(method)  # Persist the user's preference
 
-        self.current_sort_method = method
-        self.save_sorting_preference(method)
+        def safe_get(data, key, default):
+            """
+            Safely retrieves the value of a key from a dictionary, or returns a default.
+            """
+            return data.get(key, default)
 
+        # Sort based on the chosen method
         if method == "newest":
             sorted_pairs = sorted(
                 self.displayed_pairs,
-                key=lambda x: x[0].get("updated_at", ""),
+                key=lambda x: safe_get(x[0], "updated_at", ""),
                 reverse=True
             )
         elif method == "alphabetically":
             sorted_pairs = sorted(
                 self.displayed_pairs,
-                key=lambda x: x[0].get("name", "").lower()
+                key=lambda x: safe_get(x[0], "name", "").lower()
             )
         elif method == "most_used":
             sorted_pairs = sorted(
                 self.displayed_pairs,
-                key=lambda x: x[0].get("usage_count", 0),
+                key=lambda x: safe_get(x[0], "usage_count", 0),
                 reverse=True
             )
         else:
+            print(f"Unknown sorting method: {method}")
             return
 
-        #print(f"Displayed pairs after sort: {sorted_pairs}")
+        # Debug: Check sorted pairs
+        print(f"Sorted pairs: {sorted_pairs}")
+
         self.populate_table(sorted_pairs)
 
     def init_table_context_menu(self):
@@ -496,7 +508,6 @@ class Commander(QMainWindow):
 
         # Show the context menu
         menu.exec_(self.table.viewport().mapToGlobal(position))
-
 
     def confirm_and_execute(self):
         """
@@ -833,6 +844,8 @@ class Commander(QMainWindow):
 
         # Finally, update the category sidebar to show all categories
         self.update_category_sidebar()
+        self.refresh_table()  # Ensures table is populated and sorted initially
+
 
     ###########################################################################
     # THEME LOGIC
@@ -950,13 +963,18 @@ class Commander(QMainWindow):
     # TABLE LOGIC
     ###########################################################################
     def populate_table(self, pairs):
-        self.displayed_pairs = pairs  # store for later reference
-        self.table.setRowCount(len(pairs))
+        """
+        Populates the table with the given pairs (sorted shortcuts).
+        Each pair is a tuple of (shortcut, original_index).
+        """
+        self.displayed_pairs = pairs  # Store for later reference
+        self.table.setRowCount(len(pairs))  # Adjust table row count
 
-        for row_idx, (shortcut, orig_idx) in enumerate(pairs):
+        for row_idx, (shortcut, _) in enumerate(pairs):
+            # Extract shortcut attributes
             name = shortcut.get("name", "")
             command = shortcut.get("command", "")
-            description = shortcut.get("description", "") or "No description available"  # Ensure default tooltip
+            description = shortcut.get("description", "") or "No description available"  # Tooltip
             tags = ", ".join(shortcut.get("tags", []))
             category = shortcut.get("category", "")
 
@@ -966,29 +984,31 @@ class Commander(QMainWindow):
             item_tags = QTableWidgetItem(tags)
             item_category = QTableWidgetItem(category)
 
-            # Add tooltips for all items
+            # Add tooltips
             item_name.setToolTip(description)
             item_command.setToolTip(description)
             item_tags.setToolTip(description)
             item_category.setToolTip(description)
 
-            # Assign items to the table
+            # Populate the table row
             self.table.setItem(row_idx, 0, item_name)
             self.table.setItem(row_idx, 1, item_command)
             self.table.setItem(row_idx, 2, item_tags)
             self.table.setItem(row_idx, 3, item_category)
 
-        # Set custom column widths
-        self.table.setColumnWidth(0, 150)  # Name column
-        self.table.setColumnWidth(1, 200)  # Command column
-        self.table.setColumnWidth(2, 150)  # Tags column
-        self.table.setColumnWidth(3, 150)  # Category column
-        
+        # Adjust column widths for readability
+        self.table.setColumnWidth(0, 150)  # Name
+        self.table.setColumnWidth(1, 200)  # Command
+        self.table.setColumnWidth(2, 150)  # Tags
+        self.table.setColumnWidth(3, 150)  # Category
+
+        # Ensure headers resize properly
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Name column
-        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Command column
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Tags column
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Category column
+        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Name
+        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Command
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Tags
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Category
+
         
 
     ###########################################################################
@@ -998,39 +1018,51 @@ class Commander(QMainWindow):
         """
         Refreshes the table while keeping the current sorting and category filters.
         """
+        print(f"Refreshing table with current sort method: {self.current_sort_method}")
+
         # Reload shortcuts and categories
         self.load_shortcuts()
         self.update_category_sidebar()
 
         # Apply the current sorting method
-        self.sort_table(self.current_sort_method)
+        if hasattr(self, 'current_sort_method') and self.current_sort_method:
+            self.sort_table(self.current_sort_method)
+        else:
+            print("Invalid or missing sort method. Defaulting to 'newest'.")
+            self.sort_table("newest")
 
         # Reapply the current filter (if any)
+        print("Reapplying filters after sorting.")
         self.filter_table()
 
-    
     def filter_table(self):
+        """
+        Filters the table based on search text or selected category.
+        """
         filter_text = self.search_bar.text().lower().strip()
         pairs = []
 
-        for i, s in enumerate(self.shortcuts_data):
-            # 1) If we have a selected_category, skip items that don't match it
+        for shortcut, original_index in self.displayed_pairs:  # Use displayed_pairs for filtering
+            # Filter by selected category
             if self.selected_category:
-                if s.get("category", "") != self.selected_category:
+                if shortcut.get("category", "") != self.selected_category:
                     continue
 
-            # 2) If we have a filter_text, skip items that don't contain it
+            # Filter by search text
             if filter_text:
                 combined_text = " ".join([
-                    s.get("name", ""),
-                    s.get("command", ""),
-                    " ".join(s.get("tags", [])),
-                    s.get("category", "")
+                    shortcut.get("name", ""),
+                    shortcut.get("command", ""),
+                    " ".join(shortcut.get("tags", [])),
+                    shortcut.get("category", "")
                 ]).lower()
                 if filter_text not in combined_text:
                     continue
 
-            pairs.append((s, i))
+            pairs.append((shortcut, original_index))
+
+        # Debug: Check filtered data
+        print(f"Filtered {len(pairs)} items. First item: {pairs[0][0].get('name', '') if pairs else 'None'}")
 
         self.populate_table(pairs)
 
