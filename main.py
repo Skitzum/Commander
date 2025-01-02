@@ -203,6 +203,19 @@ QCheckBox::indicator:checked:hover {
 ###############################################################################
 # Set path
 ###############################################################################
+def get_relative_path(relative_path):
+    """Get the absolute path from a relative path based on the executable location."""
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+def validate_path(path):
+    """Check if the path exists; if not, prompt the user for a new root directory."""
+    if not os.path.exists(path):
+        new_root = QFileDialog.getExistingDirectory(None, "Locate Root Directory")
+        if new_root:
+            # Calculate the relative path and adjust based on the new root
+            return os.path.join(new_root, os.path.relpath(path, start=os.path.splitdrive(path)[0] + os.sep))
+    return path
 
 def get_app_folder():
     if getattr(sys, 'frozen', False):
@@ -522,6 +535,10 @@ class Commander(QMainWindow):
         row = selected_items[0].row()
         shortcut, original_index = self.displayed_pairs[row]
         command = shortcut.get("command", "").strip()
+
+        # If the command looks like a file path, convert it to an absolute path
+        if os.path.isfile(command) or command.endswith(('.exe', '.bat', '.ps1')):
+            command = get_relative_path(command)
 
         if not command:
             QMessageBox.warning(self, "No Command", "The selected shortcut has no command to execute.")
@@ -1263,8 +1280,9 @@ class Commander(QMainWindow):
     def on_add_shortcut(self):
         dialog = ShortcutDialog(self)
         if dialog.exec_() == QDialog.Accepted:
+            # Convert command to a relative path before storing
             new_data = dialog.get_data()
-
+            new_data["command"] = os.path.relpath(new_data["command"], start=get_app_folder())
             conn = sqlite3.connect(get_database_path())
             cursor = conn.cursor()
 
@@ -1458,9 +1476,10 @@ class ShortcutDialog(QDialog):
 
     def on_link_file(self):
         file_filter = "Executables / Scripts (*.exe *.bat *.ps1);;All Files (*)"
+        # Optionally, convert selected file paths to relative immediately
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Executable or Script", "", file_filter)
         if file_path:
-            self.command_edit.setText(file_path)
+            self.command_edit.setText(os.path.relpath(file_path, start=get_app_folder()))
 
     def on_ok_clicked(self):
         name = self.name_edit.text().strip()
