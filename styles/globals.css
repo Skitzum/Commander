@@ -1,0 +1,29 @@
+:root {
+  // ...existing code...
+  --table-bg: #ffffff;
+  --table-text: #000000;
+  --table-border: #e5e7eb;
+}
+
+[data-theme='dark'] {
+  // ...existing code...
+  --table-bg: #1f2937;
+  --table-text: #ffffff;
+  --table-border: #374151;
+}
+
+table {
+  // ...existing code...
+  background-color: var(--table-bg);
+  color: var(--table-text);
+  border-color: var(--table-border);
+}
+
+th, td {
+  // ...existing code...
+  border-color: var(--table-border);
+}
+
+tr:nth-child(even) {
+  background-color: color-mix(in srgb, var(--table-bg) 96%, var(--table-text) 4%);
+}

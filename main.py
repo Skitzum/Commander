@@ -9,36 +9,34 @@ import sqlite3
 from datetime import datetime
 
 from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtCore import Qt, QUrl
+from PyQt5.QtCore import Qt, QUrl, QAbstractTableModel
 from PyQt5.QtWidgets import (
     QApplication,
     QMenuBar,
+    QAbstractItemView,
     QMainWindow,
+    QTableView,
     QWidget,
     QAction,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
     QInputDialog,
-    QTableWidget,
-    QTableWidgetItem,
     QLabel,
     QStyleFactory,
     QPushButton, 
     QDialog,
-    QLabel,
-    QLineEdit,
     QMessageBox,
-    QTextEdit,
     QHeaderView,
     QComboBox,
-    QPushButton,
     QFileDialog,
     QFormLayout,
     QCheckBox,
     QListWidget,
     QSplitter,
     QMenu,
+    QDialogButtonBox,  # Add this import
+    QTextEdit  # Add this import
 )
 
 ###############################################################################
@@ -60,8 +58,11 @@ QLineEdit {
 }
 QTableWidget {
     background-color: #ffffff;
+    color: #000000;
     gridline-color: #cccccc;
     font-size: 14px;
+}
+QTableWidget::item {
     color: #000000;
 }
 QTableWidget::item:selected {
@@ -89,7 +90,7 @@ QToolTip {
     color: #ffffff;
     border: 1px solid #aaaaaa;
     padding: 5px;
-    font-size: 12px;
+    font-size: 14px;
 }
 QListWidget {
     background-color: #ffffff;
@@ -98,6 +99,20 @@ QListWidget {
 QListWidget::item:selected {
     background-color: #0078d7;
     color: #ffffff;
+}
+"""
+
+# Define the QSS for the toggle switch
+TOGGLE_SWITCH_QSS = """
+QCheckBox::indicator {
+    width: 40px;
+    height: 20px;
+}
+QCheckBox::indicator:unchecked {
+    image: url(:/images/toggle_off.png);
+}
+QCheckBox::indicator:checked {
+    image: url(:/images/toggle_on.png);
 }
 """
 
@@ -118,13 +133,16 @@ QLineEdit {
     background-color: #3b3b3b;
     color: #ffffff;
 }
-QTableWidget {
-    background-color: #3b3b3b;
+QTableWidget, QTableView {
+    background-color: #2b2b2b;
     color: #ffffff;
-    gridline-color: #555555;
+    gridline-color: #374151;
     font-size: 14px;
 }
-QTableWidget::item:selected {
+QTableWidget::item, QTableView::item {
+    color: #ffffff;
+}
+QTableWidget::item:selected, QTableView::item:selected {
     background-color: #0078d7;
     color: #ffffff;
 }
@@ -149,73 +167,26 @@ QToolTip {
     color: #ffffff;
     border: 1px solid #aaaaaa;
     padding: 5px;
-    font-size: 12px;
+    font-size: 14px;
 }
 QListWidget {
-    background-color: #3b3b3b;
+    background-color: #2b2b2b;
     color: #ffffff;
 }
 QListWidget::item:selected {
     background-color: #555555;
     color: #ffffff;
 }
-"""
-
-###############################################################################
-# Define a small toggle switch (styled QCheckBox) to switch between light/dark
-###############################################################################
-
-TOGGLE_SWITCH_QSS = """
-QCheckBox {
-    spacing: 0px;
-}
-QCheckBox::indicator {
-    width: 50px;
-    height: 25px;
-    border-radius: 12px;
-}
-QCheckBox::indicator:unchecked {
-    background-color: qlineargradient(
-        spread:pad, x1:0, y1:0, x2:1, y2:0, 
-        stop:0 black, stop:0.5 black, stop:0.5 white, stop:1 white
-    );
-}
-QCheckBox::indicator:checked {
-    background-color: qlineargradient(
-        spread:pad, x1:0, y1:0, x2:1, y2:0, 
-        stop:0 white, stop:0.5 white, stop:0.5 black, stop:1 black
-    );
-}
-QCheckBox::indicator:unchecked:hover {
-    background-color: qlineargradient(
-        spread:pad, x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #333333, stop:0.5 #333333, stop:0.5 #dddddd, stop:1 #dddddd
-    );
-}
-QCheckBox::indicator:checked:hover {
-    background-color: qlineargradient(
-        spread:pad, x1:0, y1:0, x2:1, y2:0, 
-        stop:0 #dddddd, stop:0.5 #dddddd, stop:0.5 #333333, stop:1 #333333
-    );
+QHeaderView::section {
+    background-color: #374151;
+    color: #ffffff;
+    font-weight: bold;
+    border: 1px solid #444444;
 }
 """
 
 ###############################################################################
-# Set path
 ###############################################################################
-def get_relative_path(relative_path):
-    """Get the absolute path from a relative path based on the executable location."""
-    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, relative_path)
-
-def validate_path(path):
-    """Check if the path exists; if not, prompt the user for a new root directory."""
-    if not os.path.exists(path):
-        new_root = QFileDialog.getExistingDirectory(None, "Locate Root Directory")
-        if new_root:
-            # Calculate the relative path and adjust based on the new root
-            return os.path.join(new_root, os.path.relpath(path, start=os.path.splitdrive(path)[0] + os.sep))
-    return path
 
 def get_app_folder():
     if getattr(sys, 'frozen', False):
@@ -226,9 +197,64 @@ def get_app_folder():
 def get_database_path():
     return os.path.join(get_app_folder(), "commander.db")
 
+def init_database():
+    """Initialize the database with required tables if they don't exist."""
+    conn = sqlite3.connect(get_database_path())
+    cursor = conn.cursor()
+    
+    # Create settings table if it doesn't exist
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    
+    # Initialize sort preference if it doesn't exist
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('sort_preference', 'newest')
+    """)
+    
+    conn.commit()
+    conn.close()
+
 ###############################################################################
 # Theme toggle switch
 ###############################################################################
+class ShortcutTableModel(QAbstractTableModel):
+    def __init__(self, shortcuts, parent=None):
+        super().__init__(parent)
+        self.shortcuts = shortcuts  # List of shortcut dictionaries
+
+    def rowCount(self, parent=None):
+        return len(self.shortcuts)
+
+    def columnCount(self, parent=None):
+        return 4  # Name, Command, Tags, Category
+
+    def data(self, index, role):
+        if not index.isValid():
+            return None
+
+        shortcut = self.shortcuts[index.row()]
+        if role == Qt.DisplayRole:
+            if index.column() == 0:  # Name
+                return shortcut.get("name", "")
+            elif index.column() == 1:  # Command
+                return shortcut.get("command", "")
+            elif index.column() == 2:  # Tags
+                return ", ".join(shortcut.get("tags", []))
+            elif index.column() == 3:  # Category
+                return shortcut.get("category", "")
+
+        return None
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            headers = ["Name", "Command", "Tags", "Category"]
+            return headers[section]
+        return None
 
 class ThemeToggleSwitch(QCheckBox):
     """
@@ -241,6 +267,7 @@ class ThemeToggleSwitch(QCheckBox):
         self.setText("")  # No label text
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet(TOGGLE_SWITCH_QSS)
+        self.setFixedSize(40, 20)  # Ensure the toggle switch has a fixed size
 
     def on_link_file(self):
         """
@@ -320,50 +347,85 @@ def relaunch_as_admin():
 class Commander(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # Initialize database first
+        init_database()
+        
+        # Basic setup
         self.shortcuts_data = []
-
-        # This new list will store (shortcut, original_index) for the currently displayed table rows
         self.displayed_pairs = []
-
-        # Set a default theme before initializing the UI
-        self.current_theme = "light"  # Default to light theme
-
-        # Track which category is selected (None => show all)
+        self.current_theme = "light"
         self.selected_category = None
+        self.current_sort_method = "newest"
+        self.confirmation_pending = False
+        self.log_text = ""
 
-        self.current_sort_method = "newest"  # Default sorting method
-
-        # Window Title & Initial Size
+        # Window setup
         self.setWindowTitle("Commander")
-        self.setMaximumSize(1920, 1080)  # Prevent extreme stretching
+        self.setMaximumSize(1920, 1080)
         self.setMinimumSize(800, 400)
         self.resize(1000, 600)
 
-        # Keep track of two-step confirm state
-        self.confirmation_pending = False
+        # Load data and preferences
+        self.load_shortcuts()
+        self.load_theme_preference()
+        self.load_sorting_preference()
 
-        self.load_shortcuts()  # Load shortcuts and settings
+        # Initialize UI
+        self.initUI()
+        self.apply_theme(self.current_theme)
 
-        self.initUI()  # Initialize the UI components, including self.table
-
-        self.apply_theme(self.current_theme)  # Apply the loaded theme after UI initialization
-
-        # Initially show all shortcuts
+        # Set initial data
         self.displayed_pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
-        self.sort_table(self.current_sort_method)  # Sort table after initializing UI
-        self.populate_table(self.displayed_pairs)  # Populate the table
+        
+        # Apply saved sort method
+        print(f"Initializing with sort method: {self.current_sort_method}")
+        self.sort_table(self.current_sort_method)
+
+        # Set default column widths
+        self.set_default_column_widths()
+
+        # Initialize execute button
+        self.execute_button.setStyleSheet("background-color: red; color: white;")
+
+    def set_default_column_widths(self):
+        """
+        Set default column widths for the table.
+        """
+        total_width = self.table.viewport().width()
+        self.table.setColumnWidth(0, int(total_width * 0.2))  # Name
+        self.table.setColumnWidth(1, int(total_width * 0.4))  # Command
+        self.table.setColumnWidth(2, int(total_width * 0.2))  # Tags
+        self.table.setColumnWidth(3, int(total_width * 0.2))  # Category
 
     def resizeEvent(self, event):
         font_size = max(12, self.width() // 100)  # Scale font size
         self.setStyleSheet(f"""
-            QTableWidget {{
+            QTableView {{
                 font-size: {font_size}px;
             }}
             QPushButton {{
                 font-size: {font_size}px;
             }}
+            QLabel {{
+                font-size: {font_size}px;
+            }}
+            QLineEdit {{
+                font-size: {font_size}px;
+            }}
         """)
+        self.adjust_column_widths()
         super().resizeEvent(event)
+
+    def adjust_column_widths(self):
+        """
+        Adjust column widths dynamically when resizing the window.
+        """
+        total_width = self.table.viewport().width()
+        self.table.setColumnWidth(0, int(total_width * 0.2))  # Name
+        self.table.setColumnWidth(1, int(total_width * 0.4))  # Command
+        self.table.setColumnWidth(2, int(total_width * 0.2))  # Tags
+        self.table.setColumnWidth(3, int(total_width * 0.2))  # Category
 
     def init_menu(self):
         # Create menu bar
@@ -411,16 +473,20 @@ class Commander(QMainWindow):
         refresh_action.triggered.connect(self.refresh_table)  # Fix: Use self.refresh_table instead of self.filter_table
         view_menu.addAction(refresh_action)
 
-        toggle_theme_action = QAction("Toggle Dark Mode", self)
-        toggle_theme_action.triggered.connect(lambda: self.theme_toggle_switch.toggle())
-        view_menu.addAction(toggle_theme_action)
+        theme_menu = view_menu.addMenu("Theme")
+        light_theme_action = QAction("Light Mode", self)
+        light_theme_action.triggered.connect(lambda: self.apply_theme("light"))
+        theme_menu.addAction(light_theme_action)
+
+        dark_theme_action = QAction("Dark Mode", self)
+        dark_theme_action.triggered.connect(lambda: self.apply_theme("dark"))
+        theme_menu.addAction(dark_theme_action)
 
         # Help menu
         help_menu = menubar.addMenu("Help")
 
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about_dialog)
-        help_menu.addAction(about_action)
 
         documentation_action = QAction("Documentation", self)
         documentation_action.triggered.connect(self.open_documentation)
@@ -454,13 +520,18 @@ class Commander(QMainWindow):
         Sorts the table based on the selected method.
         """
         print(f"Sorting table using method: {method}")
-        self.current_sort_method = method  # Track the current sorting method
-        self.save_sorting_preference(method)  # Persist the user's preference
+        
+        if not method:
+            method = "newest"
+            
+        self.current_sort_method = method
+        self.save_sorting_preference(method)
+
+        # Ensure we have pairs to sort
+        if not self.displayed_pairs:
+            self.displayed_pairs = [(s, i) for i, s in enumerate(self.shortcuts_data)]
 
         def safe_get(data, key, default):
-            """
-            Safely retrieves the value of a key from a dictionary, or returns a default.
-            """
             return data.get(key, default)
 
         # Sort based on the chosen method
@@ -485,10 +556,38 @@ class Commander(QMainWindow):
             print(f"Unknown sorting method: {method}")
             return
 
-        # Debug: Check sorted pairs
-        print(f"Sorted pairs: {sorted_pairs}")
-
+        # Store the sorted pairs and update the table
+        self.displayed_pairs = sorted_pairs
         self.populate_table(sorted_pairs)
+        print(f"Table sorted by {method}")
+
+    def save_sorting_preference(self, method):
+        """
+        Save the current sorting preference to the database.
+        """
+        self.current_sort_method = method  # Update the tracking variable
+
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_preference', ?)
+        """, (method,))
+        conn.commit()
+        conn.close()
+
+    def load_sorting_preference(self):
+        """
+        Load the saved sorting preference from the database.
+        """
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'sort_preference'")
+        result = cursor.fetchone()
+        if result:
+            self.current_sort_method = result[0]
+        else:
+            self.current_sort_method = "newest"  # Default to newest
+        conn.close()
 
     def init_table_context_menu(self):
         """
@@ -526,19 +625,15 @@ class Commander(QMainWindow):
         """
         Pops up a confirmation dialog and executes the selected command if confirmed.
         """
-        selected_items = self.table.selectedItems()
-        if not selected_items:
+        selected_indexes = self.table.selectionModel().selectedRows()
+        if not selected_indexes:
             QMessageBox.warning(self, "No Selection", "Please select a shortcut to execute.")
             return
 
         # Get the selected row and its command
-        row = selected_items[0].row()
+        row = selected_indexes[0].row()
         shortcut, original_index = self.displayed_pairs[row]
         command = shortcut.get("command", "").strip()
-
-        # If the command looks like a file path, convert it to an absolute path
-        if os.path.isfile(command) or command.endswith(('.exe', '.bat', '.ps1')):
-            command = get_relative_path(command)
 
         if not command:
             QMessageBox.warning(self, "No Command", "The selected shortcut has no command to execute.")
@@ -554,79 +649,28 @@ class Commander(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            self.run_selected_command(row)
+            self.run_selected_command()
 
-    def save_sorting_preference(self, method):
+    def copy_selected_command(self):
         """
-        Save the current sorting preference to the database.
+        Copies the command of the selected row to the clipboard.
         """
-        self.current_sort_method = method  # Update the tracking variable
+        selected_indexes = self.table.selectionModel().selectedRows()
+        if not selected_indexes:
+            QMessageBox.warning(self, "No Selection", "Please select a shortcut to copy.")
+            return
 
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_preference', ?)
-        """, (method,))
-        conn.commit()
-        conn.close()
-    ###########################################################################
-    # SIDEBAR / CATEGORY
-    ###########################################################################
-    def remove_unused_categories(self):
-        """
-        Remove categories that are no longer associated with any shortcuts.
-        """
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        # Get the selected row and its command
+        row = selected_indexes[0].row()
+        command = self.model.data(self.model.index(row, 1), Qt.DisplayRole)
 
-        # Delete unused categories
-        cursor.execute("""
-            DELETE FROM categories
-            WHERE id NOT IN (SELECT DISTINCT category_id FROM shortcuts)
-        """)
+        if not command:
+            QMessageBox.warning(self, "No Command", "The selected shortcut has no command to copy.")
+            return
 
-        conn.commit()
-        conn.close()
-
-    def update_category_list(self):
-        """
-        Gather unique category names from the database.
-        """
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM categories ORDER BY name")
-        self.available_categories = [row[0] for row in cursor.fetchall()]
-        conn.close()
-
-    def update_category_sidebar(self):
-        """
-        Clear and repopulate the category_list QListWidget.
-        Includes an '(All Categories)' item to reset filter.
-        """
-        self.category_list.clear()
-        
-        # Fetch updated categories from the database
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT name
-            FROM categories
-            WHERE name IS NOT NULL AND TRIM(name) != ''
-            ORDER BY name
-        """)
-        categories = [row[0] for row in cursor.fetchall()]
-        conn.close()
-
-        # Add an item to show all categories
-        self.category_list.addItem("(All Categories)")
-
-        # Add the individual categories
-        for cat in categories:
-            self.category_list.addItem(cat)
-
-        # Enable context menu on category_list
-        self.category_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.category_list.customContextMenuRequested.connect(self.show_category_context_menu)
+        clipboard = QApplication.clipboard()
+        clipboard.setText(command)
+        self.info_label.setText("Command copied to clipboard.")
 
     def show_category_context_menu(self, position):
         """
@@ -717,7 +761,7 @@ class Commander(QMainWindow):
         Then call filter_table().
         """
         cat_text = item.text()
-        if cat_text == "(All Categories)":
+        if (cat_text == "(All Categories)"):
             self.selected_category = None
         else:
             self.selected_category = cat_text
@@ -731,11 +775,11 @@ class Commander(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.init_menu()
+
         # Create the main horizontal layout
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(10, 10, 10, 10)  # Add margins
         main_layout.setSpacing(10)  # Add spacing between components
-
         central_widget.setLayout(main_layout)
         
         # Create the splitter
@@ -744,8 +788,6 @@ class Commander(QMainWindow):
         # 1) Left Sidebar: Category List
         self.category_list = QListWidget()
         self.category_list.itemClicked.connect(self.on_category_selected)
-        # We'll call update_category_sidebar() after load_shortcuts to fill it
-
         splitter.addWidget(self.category_list)  # Add the category list to the splitter
 
         # 2) Right Panel
@@ -762,86 +804,74 @@ class Commander(QMainWindow):
         search_layout.addWidget(search_label)
         search_layout.addWidget(self.search_bar)
 
-        # Add the toggle switch to the same row
-        self.theme_toggle_switch = ThemeToggleSwitch(checked=(self.current_theme == "dark"))
-        self.theme_toggle_switch.toggled.connect(self.on_theme_switch_toggled)
-        search_layout.addWidget(self.theme_toggle_switch)
-
         right_panel.addLayout(search_layout)
 
         # ========== Table ==========
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Name", "Command", "Tags", "Category"])
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.cellClicked.connect(self.on_table_select)
+        self.table = QTableView(self)
+        self.model = ShortcutTableModel(self.shortcuts_data, self)
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+        # Connect selection changes
+        self.table.selectionModel().selectionChanged.connect(self.on_table_select)
         self.init_table_context_menu()
-        self.table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #666666;
-                gridline-color: #444444;
-                background-color: #3b3b3b;
-                alternate-background-color: #2b2b2b;
-            }
-            QHeaderView::section {
-                background-color: #555555;
-                color: #ffffff;
-                font-weight: bold;
-                border: 1px solid #444444;
-            }
-            QTableWidget::item:selected {
-                background-color: #0078d7;
-                color: #ffffff;
-            }
-        """)
+
         right_panel.addWidget(self.table)
-        
 
         # ========== CRUD + Bottom Layout ==========
-        bottom_layout = QHBoxLayout()
-
-        # Execute Button
-        self.execute_button = QPushButton("Execute")
-        self.execute_button.setEnabled(False)
-        self.execute_button.clicked.connect(self.on_execute_clicked)
-
-        # CRUD Buttons (Add, Edit, Delete)
         crud_layout = QHBoxLayout()
 
+        # Add Shortcut Button
         self.add_button = QPushButton("Add Shortcut")
         self.add_button.clicked.connect(self.on_add_shortcut)
+        self.add_button.setMaximumWidth(150)
         crud_layout.addWidget(self.add_button)
 
+        # Edit Shortcut Button
         self.edit_button = QPushButton("Edit Shortcut")
         self.edit_button.clicked.connect(self.on_edit_shortcut)
         self.edit_button.setEnabled(False)
+        self.edit_button.setMaximumWidth(150)
         crud_layout.addWidget(self.edit_button)
 
+        # Delete Shortcut Button
         self.delete_button = QPushButton("Delete Shortcut")
         self.delete_button.clicked.connect(self.on_delete_shortcut)
         self.delete_button.setEnabled(False)
-        crud_layout.addWidget(self.delete_button)
-        self.add_button.setMaximumWidth(150)
-        self.edit_button.setMaximumWidth(150)
         self.delete_button.setMaximumWidth(150)
-        self.execute_button.setMaximumWidth(200)
+        crud_layout.addWidget(self.delete_button)
 
         right_panel.addLayout(crud_layout)
 
-        # Info Label
-        self.info_label = QLabel("")
-        self.info_label.setStyleSheet(
-            "color: #333333;" if self.current_theme == "light" else "color: #dddddd;"
-        )
+        # Info Label and Execute Button
+        bottom_layout = QHBoxLayout()
+        self.execute_button = QPushButton("Execute")
+        self.execute_button.setEnabled(False)
+        self.execute_button.setMaximumWidth(200)
+        self.execute_button.clicked.connect(self.on_execute_clicked)
+
+        self.log_button = QPushButton("Execution Log")  # Add log button
+        self.log_button.setMaximumWidth(200)
+        self.log_button.clicked.connect(self.show_log_dialog)
 
         bottom_layout.addWidget(self.execute_button)
-        bottom_layout.addWidget(self.info_label)
+        bottom_layout.addWidget(self.log_button)  # Add log button to layout
 
         right_panel.addLayout(bottom_layout)
 
-        # Wrap the right panel layout in a QWidget
+        # New Info Label below all buttons
+        self.info_label = QLabel("")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setStyleSheet(
+            "color: #333333;" if self.current_theme == "light" else "color: #dddddd;"
+        )
+        right_panel.addWidget(self.info_label)
+
+        # Wrap the right panel in a widget
         right_panel_widget = QWidget()
         right_panel_widget.setLayout(right_panel)
 
@@ -852,45 +882,63 @@ class Commander(QMainWindow):
         splitter.setStretchFactor(1, 4)  # Table expands more
         splitter.setSizes([200, 800])  # Initial sizes (sidebar, table)
 
-
-        # Set default sizes (adjust as needed for your desired ratio)
-        splitter.setSizes([150, 400])  # Left panel starts with 1/3 width, right panel 2/3
-        
         # Add the splitter to the main layout
         main_layout.addWidget(splitter)
 
-        # Finally, update the category sidebar to show all categories
+        # Update categories and table
         self.update_category_sidebar()
-        self.refresh_table()  # Ensures table is populated and sorted initially
+        self.refresh_table()
 
+    def show_log_dialog(self):
+        """
+        Show a dialog with the log text.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Log")
+        layout = QVBoxLayout(dialog)
+
+        log_text_edit = QTextEdit(dialog)
+        log_text_edit.setReadOnly(True)
+        log_text_edit.setPlainText(self.log_text)
+        layout.addWidget(log_text_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok, dialog)
+        button_box.accepted.connect(dialog.accept)
+        layout.addWidget(button_box)
+
+        dialog.exec_()
+
+    def update_log(self, message):
+        """
+        Update the log text with a new message.
+        """
+        self.log_text += message + "\n"
+
+    def update_info_label(self, message):
+        """
+        Updates the info label with the given message and logs it.
+        """
+        self.info_label.setText(message)
+        self.update_log(message)
 
     ###########################################################################
     # THEME LOGIC
     ###########################################################################
     def apply_theme(self, theme_name):
         """Applies the specified theme stylesheet to the QApplication."""
-        if theme_name == "dark":
+        self.current_theme = theme_name
+        if (theme_name == "dark"):
             QApplication.instance().setStyleSheet(DARK_STYLESHEET)
             if hasattr(self, 'info_label'):
-                self.info_label.setStyleSheet("color: #dddddd;")  # Light text for dark background
+                self.info_label.setStyleSheet("color: #dddddd;")
         else:
             QApplication.instance().setStyleSheet(LIGHT_STYLESHEET)
             if hasattr(self, 'info_label'):
-                self.info_label.setStyleSheet("color: #333333;")  # Dark text for light background
-
-    def on_theme_switch_toggled(self, checked):
-        """
-        If 'checked' is True => 'dark' mode; otherwise => 'light'.
-        """
-        self.current_theme = "dark" if checked else "light"
-        #print(f"Theme toggled. New theme: {self.current_theme}")
-        self.apply_theme(self.current_theme)
+                self.info_label.setStyleSheet("color: #333333;")
         self.save_theme_preference()  # Save the new preference
 
     def save_theme_preference(self):
-        """
-        Save the current theme preference to the database.
-        """
+        """Save the current theme preference to the database."""
         conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
         cursor.execute("""
@@ -898,7 +946,19 @@ class Commander(QMainWindow):
         """, (self.current_theme,))
         conn.commit()
         conn.close()
-        #print(f"Theme preference saved: {self.current_theme}")
+
+    def load_theme_preference(self):
+        """Load the saved theme preference from the database."""
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'theme'")
+        result = cursor.fetchone()
+        if result:
+            self.current_theme = result[0]
+        else:
+            self.current_theme = "light"  # Default to light theme
+        conn.close()
+        self.apply_theme(self.current_theme)
 
     ###########################################################################
     # LOADING / SAVING
@@ -907,41 +967,39 @@ class Commander(QMainWindow):
         conn = sqlite3.connect(get_database_path())
         cursor = conn.cursor()
 
-        # Query shortcuts with categories and tags
+        # Optimized query: Select only required columns
         cursor.execute("""
-            SELECT s.id, s.name, s.command, s.description,
-                c.name AS category, GROUP_CONCAT(t.name) AS tags,
+            SELECT s.id, s.name, s.command, s.description, c.name AS category, 
                 s.updated_at, s.usage_count
             FROM shortcuts s
             LEFT JOIN categories c ON s.category_id = c.id
-            LEFT JOIN shortcut_tags st ON s.id = st.shortcut_id
-            LEFT JOIN tags t ON st.tag_id = t.id
-            GROUP BY s.id
+            ORDER BY s.updated_at DESC
         """)
         self.shortcuts_data = [
             {
                 "id": row[0],
                 "name": row[1],
                 "command": row[2],
-                "description": row[3],
-                "requires_input": bool(re.search(r"{(.*?)}", row[2])),  # Auto-detect placeholders
+                "description": row[3] or "No description available",
                 "category": row[4] or "",
-                "tags": row[5].split(",") if row[5] else [],
-                "updated_at": row[6] or "",
-                "usage_count": int(row[7]) if row[7] else 0
+                "updated_at": row[5] or "",
+                "usage_count": int(row[6]) if row[6] else 0,
             }
             for row in cursor.fetchall()
         ]
 
-        # Load settings
-        cursor.execute("SELECT key, value FROM settings")
-        self.settings_data = {row[0]: row[1] for row in cursor.fetchall()}
-        self.current_theme = self.settings_data.get("theme", "light")
-        self.current_sort_method = self.settings_data.get("sort_preference", "newest")
-        conn.close()
+        # Load tags for each shortcut
+        for shortcut in self.shortcuts_data:
+            cursor.execute("""
+                SELECT t.name
+                FROM tags t
+                JOIN shortcut_tags st ON t.id = st.tag_id
+                WHERE st.shortcut_id = ?
+            """, (shortcut["id"],))
+            shortcut["tags"] = [row[0] for row in cursor.fetchall()]
+            #print(f"Loaded tags for shortcut '{shortcut['name']}': {shortcut['tags']}")  # Debug print
 
-        #print(f"Shortcuts loaded: {self.shortcuts_data}")
-        #print(f"Settings loaded: {self.settings_data}")
+        conn.close()
 
     def save_shortcuts(self):
         """
@@ -966,6 +1024,7 @@ class Commander(QMainWindow):
                     INSERT INTO shortcut_tags (shortcut_id, tag_id)
                     SELECT ?, id FROM tags WHERE name = ?
                 """, (shortcut.get("id"), tag))
+                print(f"Saved tag '{tag}' for shortcut '{shortcut['name']}'")  # Debug print
 
         # Save settings
         for key, value in self.settings_data.items():
@@ -979,54 +1038,29 @@ class Commander(QMainWindow):
     ###########################################################################
     # TABLE LOGIC
     ###########################################################################
-    def populate_table(self, pairs):
+    def populate_table(self, pairs, page=1, page_size=100):
         """
-        Populates the table with the given pairs (sorted shortcuts).
-        Each pair is a tuple of (shortcut, original_index).
+        Updates the model with a subset of the given pairs for lazy loading.
+        Implements pagination.
         """
-        self.displayed_pairs = pairs  # Store for later reference
-        self.table.setRowCount(len(pairs))  # Adjust table row count
+        self.current_page = page  # Track the current page
+        self.page_size = page_size  # Items per page
+        self.total_items = len(pairs)  # Total number of pairs
+        self.total_pages = (self.total_items + page_size - 1) // page_size  # Calculate total pages
 
-        for row_idx, (shortcut, _) in enumerate(pairs):
-            # Extract shortcut attributes
-            name = shortcut.get("name", "")
-            command = shortcut.get("command", "")
-            description = shortcut.get("description", "") or "No description available"  # Tooltip
-            tags = ", ".join(shortcut.get("tags", []))
-            category = shortcut.get("category", "")
+        # Determine the range of items to display
+        start_index = (page - 1) * page_size
+        end_index = min(start_index + page_size, self.total_items)
+        displayed_pairs = pairs[start_index:end_index]
 
-            # Create table items
-            item_name = QTableWidgetItem(name)
-            item_command = QTableWidgetItem(command)
-            item_tags = QTableWidgetItem(tags)
-            item_category = QTableWidgetItem(category)
+        # Update the model with the displayed data
+        self.model.shortcuts = [pair[0] for pair in displayed_pairs]
+        self.model.layoutChanged.emit()  # Notify the view that the data has changed
 
-            # Add tooltips
-            item_name.setToolTip(description)
-            item_command.setToolTip(description)
-            item_tags.setToolTip(description)
-            item_category.setToolTip(description)
-
-            # Populate the table row
-            self.table.setItem(row_idx, 0, item_name)
-            self.table.setItem(row_idx, 1, item_command)
-            self.table.setItem(row_idx, 2, item_tags)
-            self.table.setItem(row_idx, 3, item_category)
-
-        # Adjust column widths for readability
-        self.table.setColumnWidth(0, 150)  # Name
-        self.table.setColumnWidth(1, 200)  # Command
-        self.table.setColumnWidth(2, 150)  # Tags
-        self.table.setColumnWidth(3, 150)  # Category
-
-        # Ensure headers resize properly
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)  # Name
-        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Command
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Tags
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Category
-
-        
+        # Update navigation info
+        self.info_label.setText(
+            f"Showing {start_index + 1}-{end_index} of {self.total_items} items (Page {page}/{self.total_pages})"
+        )
 
     ###########################################################################
     # SEARCH LOGIC
@@ -1052,6 +1086,9 @@ class Commander(QMainWindow):
         print("Reapplying filters after sorting.")
         self.filter_table()
 
+        # Update the info label
+        self.update_info_label()
+
     def filter_table(self):
         """
         Filters the table based on search text or selected category.
@@ -1062,7 +1099,7 @@ class Commander(QMainWindow):
         pairs = []
 
         # Reset to all items in the current category (or all if none selected)
-        for i, shortcut in enumerate(self.shortcuts_data):  # Use shortcuts_data for a full reset
+        for i, shortcut in enumerate(self.shortcuts_data):
             # Filter by selected category first
             if self.selected_category:
                 if shortcut.get("category", "") != self.selected_category:
@@ -1081,42 +1118,82 @@ class Commander(QMainWindow):
 
             pairs.append((shortcut, i))
 
-        # Debug: Check the filtering process
-        #print(f"Filtered {len(pairs)} items for search '{filter_text}'. First item: {pairs[0][0].get('name', '') if pairs else 'None'}")
+        # Store the filtered pairs
+        self.displayed_pairs = pairs
 
         # Populate the table with the filtered results
         self.populate_table(pairs)
 
+        # Update the info label with filter context
+        filter_info = []
+        if self.selected_category:
+            filter_info.append(f"Category: {self.selected_category}")
+        if filter_text:
+            filter_info.append(f"Search: '{filter_text}'")
+        
+        status = f"Showing {len(pairs)} items"
+        if filter_info:
+            status += f" ({' | '.join(filter_info)})"
+        self.info_label.setText(status)
+
+    def update_info_label(self):
+        """
+        Updates the info label with the current table status.
+        """
+        total_items = len(self.displayed_pairs)
+        self.info_label.setText(f"Showing {total_items} items")
 
     ###########################################################################
     # TABLE SELECTION (Enabling Execute, Edit, Delete)
     ###########################################################################
-    def on_table_select(self, row, column):
-        self.execute_button.setEnabled(True)
-        self.execute_button.setText("Execute")
-        self.confirmation_pending = False
-
-        # Make it red
-        self.execute_button.setStyleSheet("background-color: red; color: white;")
-
-        self.edit_button.setEnabled(True)
-        self.delete_button.setEnabled(True)
-
-        item_name = self.table.item(row, 0).text()
-        item_command = self.table.item(row, 1).text()
-        self.info_label.setText(f"Selected: {item_name} | Command: {item_command}")
-    def copy_selected_command(self):
+    def on_table_select(self, selected, deselected):
         """
-        Copies the command of the selected row to the clipboard.
+        Handles table row selection.
+        Updates the info_label with the selected shortcut details.
         """
-        selected_items = self.table.selectedItems()
-        if selected_items:
-            command = selected_items[1].text()  # Assuming column 1 is the "Command" column
-            clipboard = QApplication.clipboard()
-            clipboard.setText(command)
-            self.info_label.setText("Command copied to clipboard.")
+        indexes = self.table.selectionModel().selectedRows()
+        if indexes:
+            row = indexes[0].row()
+            if row < len(self.displayed_pairs):
+                shortcut = self.displayed_pairs[row][0]
+                name = shortcut.get("name", "")
+                command = shortcut.get("command", "")
+                
+                # Build status message with context
+                status = f"Selected: {name} | Command: {command}"
+                
+                # Add category/search context if filtered
+                filter_info = []
+                if self.selected_category:
+                    filter_info.append(f"Category: {self.selected_category}")
+                if self.search_bar.text().strip():
+                    filter_info.append(f"Search: '{self.search_bar.text().strip()}'")
+                
+                if filter_info:
+                    status += f" ({' | '.join(filter_info)})"
+                
+                self.info_label.setText(status)
+                
+                # Enable buttons for selected rows
+                self.execute_button.setEnabled(True)
+                self.edit_button.setEnabled(True)
+                self.delete_button.setEnabled(True)
         else:
-            self.info_label.setText("No item selected to copy.")
+            # If no selection, show only filter context
+            filter_info = []
+            if self.selected_category:
+                filter_info.append(f"Category: {self.selected_category}")
+            if self.search_bar.text().strip():
+                filter_info.append(f"Search: '{self.search_bar.text().strip()}'")
+            
+            status = f"Showing {len(self.displayed_pairs)} items"
+            if filter_info:
+                status += f" ({' | '.join(filter_info)})"
+            
+            self.info_label.setText(status)
+            self.execute_button.setEnabled(False)
+            self.edit_button.setEnabled(False)
+            self.delete_button.setEnabled(False)
 
     ###########################################################################
     # TWO-STEP EXECUTION
@@ -1133,26 +1210,20 @@ class Commander(QMainWindow):
             self.confirmation_pending = False
             self.execute_button.setStyleSheet("background-color: red; color: white;")
 
-    def run_selected_command(self, row=None):
+    def run_selected_command(self):
         """
-        Executes the command of the selected row, either from a button or a right-click context menu.
+        Executes the command of the selected row in the table.
         """
-        if row is None:  # If no row is passed, use the currently selected item
-            selected_items = self.table.selectedItems()
-            if not selected_items:
-                print("No item selected.")
-                self.info_label.setText("No item selected.")
-                return
-
-            row = selected_items[0].row()
-
-        # Safeguard: Verify row alignment with displayed_pairs
-        if row >= len(self.displayed_pairs):
-            print("Invalid row selection. Out of range.")
-            self.info_label.setText("Invalid selection.")
+        # Get selected rows from the selection model
+        selected_indexes = self.table.selectionModel().selectedRows()
+        if not selected_indexes:
+            print("No item selected.")
+            self.info_label.setText("No item selected.")
             return
 
-        shortcut, original_index = self.displayed_pairs[row]
+        # Get the first selected row
+        row = selected_indexes[0].row()
+        shortcut = self.model.shortcuts[row]  # Retrieve the shortcut from the model
 
         # Validate command
         command = shortcut.get("command", "").strip()
@@ -1165,13 +1236,13 @@ class Commander(QMainWindow):
         placeholders = re.findall(r"{(.*?)}", command)
         if placeholders:
             print(f"Detected placeholders: {placeholders}")
-            for ph in placeholders:
-                val = self.prompt_for_variable(ph)
-                if not val:  # Handle missing input
-                    self.info_label.setText(f"Execution canceled. Missing value for {ph}.")
-                    print(f"Command canceled due to missing value for placeholder: {ph}")
-                    return
-                # Replace the placeholder with the user-provided value
+            placeholder_values = self.prompt_for_variables(placeholders, command)
+            if not placeholder_values:  # Handle missing input
+                self.info_label.setText("Execution canceled. Missing values for placeholders.")
+                print("Command canceled due to missing values for placeholders.")
+                return
+            # Replace the placeholders with the user-provided values
+            for ph, val in placeholder_values.items():
                 command = command.replace(f"{{{ph}}}", val)
 
         # Re-validate command to check for unresolved placeholders
@@ -1195,6 +1266,7 @@ class Commander(QMainWindow):
         try:
             subprocess.Popen(interactive_command, shell=True)
             print(f"Executing: {interactive_command}")
+            self.update_log(f"Executed: {command}")  # Log the execution
         except Exception as e:
             print(f"Error executing command: {e}")
             self.info_label.setText(f"Error executing: {e}")
@@ -1212,13 +1284,45 @@ class Commander(QMainWindow):
         conn.commit()
         conn.close()
 
-        # Update the in-memory shortcut data
+        # Update the model data
         shortcut["usage_count"] += 1
         shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.update_table_row(row, shortcut)
+        self.model.layoutChanged.emit()  # Notify the view of the update
+        self.refresh_table()
 
-        # Automatically sort the table after updates
-        self.sort_table(self.current_sort_method)
+    def prompt_for_variables(self, placeholders, command):
+        """
+        Prompts the user for input to replace multiple placeholders.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Input Required")
+        layout = QVBoxLayout(dialog)
+
+        command_layout = QHBoxLayout()
+        command_parts = re.split(r"({.*?})", command)
+        input_fields = {}
+
+        for part in command_parts:
+            if part.startswith("{") and part.endswith("}"):
+                placeholder = part[1:-1]
+                input_field = QLineEdit(dialog)
+                input_field.setPlaceholderText(placeholder)  # Set ghost text
+                input_fields[placeholder] = input_field
+                command_layout.addWidget(input_field)
+            else:
+                command_layout.addWidget(QLabel(part, dialog))
+
+        layout.addLayout(command_layout)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        layout.addWidget(button_box)
+
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        if dialog.exec_() == QDialog.Accepted:
+            return {ph: input_fields[ph].text().strip() for ph in input_fields}
+        return None
 
     def update_shortcut_usage(self, shortcut, row):
         # Update database
@@ -1261,7 +1365,7 @@ class Commander(QMainWindow):
         )
         if ok and text.strip():
             # Validate numeric input for specific placeholders
-            if placeholder_label == "time":
+            if (placeholder_label == "time"):
                 if not text.strip().isdigit():
                     QMessageBox.warning(
                         self,
@@ -1280,9 +1384,8 @@ class Commander(QMainWindow):
     def on_add_shortcut(self):
         dialog = ShortcutDialog(self)
         if dialog.exec_() == QDialog.Accepted:
-            # Convert command to a relative path before storing
             new_data = dialog.get_data()
-            new_data["command"] = os.path.relpath(new_data["command"], start=get_app_folder())
+
             conn = sqlite3.connect(get_database_path())
             cursor = conn.cursor()
 
@@ -1295,21 +1398,29 @@ class Commander(QMainWindow):
             """, (new_data["category"],))
             category_id = cursor.fetchone()[0]
 
-            # Insert the new shortcut, auto-detect if placeholders exist
-            requires_input = bool(re.search(r"{(.*?)}", new_data["command"]))  # Detect placeholders dynamically
+            # Insert the new shortcut
             cursor.execute("""
                 INSERT INTO shortcuts (name, command, description, category_id)
                 VALUES (?, ?, ?, ?)
             """, (new_data["name"], new_data["command"], new_data["description"], category_id))
-
-            # Insert tags and link them to the shortcut
             shortcut_id = cursor.lastrowid
-            for tag in new_data["tags"]:
-                cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
-                cursor.execute("""
-                    INSERT INTO shortcut_tags (shortcut_id, tag_id)
-                    SELECT ?, id FROM tags WHERE name = ?
-                """, (shortcut_id, tag))
+
+            # Batch insert tags
+            tags = [(tag,) for tag in new_data["tags"]]
+            cursor.executemany("INSERT OR IGNORE INTO tags (name) VALUES (?)", tags)
+
+            # Fetch tag IDs
+            cursor.execute("SELECT id, name FROM tags WHERE name IN ({})".format(
+                ",".join("?" for _ in new_data["tags"])
+            ), new_data["tags"])
+            tag_ids = [row[0] for row in cursor.fetchall()]
+
+            # Batch insert shortcut-tags
+            shortcut_tags = [(shortcut_id, tag_id) for tag_id in tag_ids]
+            cursor.executemany("""
+                INSERT INTO shortcut_tags (shortcut_id, tag_id)
+                VALUES (?, ?)
+            """, shortcut_tags)
 
             conn.commit()
             conn.close()
@@ -1320,13 +1431,18 @@ class Commander(QMainWindow):
             self.refresh_table()
 
     def on_edit_shortcut(self):
-        selected_items = self.table.selectedItems()
-        if not selected_items:
+        selected_indexes = self.table.selectionModel().selectedRows()
+        if not selected_indexes:
             return
 
-        table_row = selected_items[0].row()
+        table_row = selected_indexes[0].row()
         shortcut, original_index = self.displayed_pairs[table_row]
-        dialog = ShortcutDialog(self, shortcut_data=shortcut)
+
+        # Reload the shortcut data to ensure we have the latest changes
+        self.load_shortcuts()
+        updated_shortcut = self.shortcuts_data[original_index]
+
+        dialog = ShortcutDialog(self, shortcut_data=updated_shortcut)
 
         if dialog.exec_() == QDialog.Accepted:
             updated_data = dialog.get_data()
@@ -1343,8 +1459,7 @@ class Commander(QMainWindow):
             """, (updated_data["category"],))
             category_id = cursor.fetchone()[0]
 
-            # Update the shortcut, auto-detect if placeholders exist
-            requires_input = bool(re.search(r"{(.*?)}", updated_data["command"]))  # Detect placeholders dynamically
+            # Update the shortcut
             cursor.execute("""
                 UPDATE shortcuts
                 SET name = ?, command = ?, description = ?, category_id = ?
@@ -1365,16 +1480,16 @@ class Commander(QMainWindow):
 
             # Refresh the UI
             self.remove_unused_categories()  # Remove unused categories
-            self.load_shortcuts()
+            self.load_shortcuts()  # Reload shortcuts data
             self.update_category_sidebar()
-            self.filter_table()
+            self.refresh_table()  # Refresh the table to display the latest data
 
     def on_delete_shortcut(self):
-        selected_items = self.table.selectedItems()
-        if not selected_items:
+        selected_indexes = self.table.selectionModel().selectedRows()
+        if not selected_indexes:
             return
 
-        table_row = selected_items[0].row()
+        table_row = selected_indexes[0].row()
         shortcut, original_index = self.displayed_pairs[table_row]
         shortcut_name = shortcut["name"]
 
@@ -1417,6 +1532,52 @@ class Commander(QMainWindow):
 
         conn.commit()
         conn.close()
+
+    def remove_unused_categories(self):
+        """
+        Remove categories that are no longer associated with any shortcuts.
+        """
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+
+        # Delete unused categories
+        cursor.execute("""
+            DELETE FROM categories
+            WHERE id NOT IN (SELECT DISTINCT category_id FROM shortcuts)
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def update_category_sidebar(self):
+        """
+        Clear and repopulate the category_list QListWidget.
+        Includes an '(All Categories)' item to reset filter.
+        """
+        self.category_list.clear()
+        
+        # Fetch updated categories from the database
+        conn = sqlite3.connect(get_database_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name
+            FROM categories
+            WHERE name IS NOT NULL AND TRIM(name) != ''
+            ORDER BY name
+        """)
+        categories = [row[0] for row in cursor.fetchall()]
+        conn.close()
+
+        # Add an item to show all categories
+        self.category_list.addItem("(All Categories)")
+
+        # Add the individual categories
+        for cat in categories:
+            self.category_list.addItem(cat)
+
+        # Enable context menu on category_list
+        self.category_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.category_list.customContextMenuRequested.connect(self.show_category_context_menu)
 
 ###############################################################################
 # Shortcut editing
@@ -1476,10 +1637,9 @@ class ShortcutDialog(QDialog):
 
     def on_link_file(self):
         file_filter = "Executables / Scripts (*.exe *.bat *.ps1);;All Files (*)"
-        # Optionally, convert selected file paths to relative immediately
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Executable or Script", "", file_filter)
         if file_path:
-            self.command_edit.setText(os.path.relpath(file_path, start=get_app_folder()))
+            self.command_edit.setText(file_path)
 
     def on_ok_clicked(self):
         name = self.name_edit.text().strip()
@@ -1526,38 +1686,8 @@ def main():
     try:
         app = QApplication(sys.argv)
         app.setStyle(QStyleFactory.create("Fusion"))
-        app.setStyleSheet("""
-            QMainWindow {
-                background-color: #f0f0f0;
-            }
-            QLabel {
-                font-size: 14px;
-            }
-            QLineEdit {
-                font-size: 14px;
-                padding: 4px;
-            }
-            QTableWidget {
-                background-color: #ffffff;
-                gridline-color: #cccccc;
-                font-size: 14px;
-            }
-            QTableWidget::item:selected {
-                background-color: #0078d7;
-                color: #ffffff;
-            }
-            QPushButton {
-                font-size: 14px;
-                padding: 6px 12px;
-            }
-            QToolTip {
-                background-color: #222222;
-                color: #ffffff;
-                border: 1px solid #aaaaaa;
-                padding: 5px;
-                font-size: 12px;
-            }
-        """)
+
+        init_database()
 
         window = Commander()
         window.show()
