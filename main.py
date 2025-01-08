@@ -100,6 +100,21 @@ QListWidget::item:selected {
     background-color: #0078d7;
     color: #ffffff;
 }
+QCheckBox {
+    color: #000000;
+    font-size: 14px;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 1px solid #cccccc;
+    border-radius: 3px;
+    background: #ffffff;
+}
+QCheckBox::indicator:checked {
+    background: #0078d7;
+    border-color: #0078d7;
+}
 """
 
 # Define the QSS for the toggle switch
@@ -183,6 +198,21 @@ QHeaderView::section {
     font-weight: bold;
     border: 1px solid #444444;
 }
+QCheckBox {
+    color: #dddddd;
+    font-size: 14px;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 1px solid #666666;
+    border-radius: 3px;
+    background: #3b3b3b;
+}
+QCheckBox::indicator:checked {
+    background: #0078d7;
+    border-color: #0078d7;
+}
 """
 
 ###############################################################################
@@ -198,26 +228,58 @@ def get_database_path():
     return os.path.join(get_app_folder(), "commander.db")
 
 def init_database():
-    """Initialize the database with required tables if they don't exist."""
-    conn = sqlite3.connect(get_database_path())
-    cursor = conn.cursor()
-    
-    # Create settings table if it doesn't exist
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    
-    # Initialize sort preference if it doesn't exist
-    cursor.execute("""
-        INSERT OR IGNORE INTO settings (key, value)
-        VALUES ('sort_preference', 'newest')
-    """)
-    
-    conn.commit()
-    conn.close()
+    """
+    Initialize the in-memory database by copying schema and data from the persistent database.
+    """
+    global conn_disk, conn_memory
+    conn_disk = sqlite3.connect(get_database_path())  # Persistent database on disk
+    conn_memory = sqlite3.connect(":memory:")         # In-memory database
+
+    cursor_disk = conn_disk.cursor()
+    cursor_memory = conn_memory.cursor()
+
+    # Copy schema and data
+    for line in conn_disk.iterdump():
+        try:
+            cursor_memory.execute(line)
+        except sqlite3.Error as e:
+            print(f"Error executing line: {line}")
+            print(f"SQLite error: {e}")
+
+    conn_memory.commit()
+
+def flush_memory_to_disk():
+    """
+    Flush changes from the in-memory database back to the persistent disk database.
+    """
+    global conn_disk, conn_memory
+    cursor_disk = conn_disk.cursor()
+
+    # Clear existing data from disk tables
+    tables_to_clear = ["settings", "shortcuts", "categories", "tags", "shortcut_tags", "preferences"]
+    for table in tables_to_clear:
+        cursor_disk.execute(f"DELETE FROM {table};")
+
+    # Dump in-memory data back to disk
+    for line in conn_memory.iterdump():
+        # Skip problematic statements
+        if any(
+            line.startswith(keyword)
+            for keyword in ("CREATE TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX", "BEGIN TRANSACTION", "COMMIT")
+        ):
+            continue
+        try:
+            cursor_disk.execute(line)
+        except sqlite3.IntegrityError as e:
+            print(f"Integrity error executing line: {line}")
+            print(f"SQLite error: {e}")
+        except sqlite3.Error as e:
+            print(f"Error executing line: {line}")
+            print(f"SQLite error: {e}")
+
+    # Commit changes to the disk database
+    conn_disk.commit()
+    print("Flushed in-memory changes to disk.")
 
 ###############################################################################
 # Theme toggle switch
@@ -360,11 +422,26 @@ class Commander(QMainWindow):
         self.confirmation_pending = False
         self.log_text = ""
 
-        # Window setup
+        # Window setup with dynamic sizing
         self.setWindowTitle("Commander")
-        self.setMaximumSize(1920, 1080)
-        self.setMinimumSize(800, 400)
-        self.resize(1000, 600)
+        screen = QApplication.primaryScreen().availableGeometry()
+        
+        # Store screen dimensions for later use
+        self.screen_width = screen.width()
+        self.screen_height = screen.height()
+        
+        # Set minimum size to 40% of screen
+        self.setMinimumSize(
+            int(self.screen_width * 0.4),
+            int(self.screen_height * 0.4)
+        )
+        
+        # Set default size to 80% (used when window is restored)
+        self.default_width = int(self.screen_width * 0.8)
+        self.default_height = int(self.screen_height * 0.8)
+        
+        # Start maximized
+        self.setWindowState(Qt.WindowMaximized)
 
         # Load data and preferences
         self.load_shortcuts()
@@ -388,6 +465,17 @@ class Commander(QMainWindow):
         # Initialize execute button
         self.execute_button.setStyleSheet("background-color: red; color: white;")
 
+        # Add minimum column widths
+        self.min_column_widths = {
+            0: 100,  # Name minimum width
+            1: 150,  # Command minimum width
+            2: 80,   # Tags minimum width
+            3: 80    # Category minimum width
+        }
+        
+        # Set smaller minimum window width
+        self.setMinimumWidth(500)  # Allow window to be shrunk more
+
     def set_default_column_widths(self):
         """
         Set default column widths for the table.
@@ -399,33 +487,99 @@ class Commander(QMainWindow):
         self.table.setColumnWidth(3, int(total_width * 0.2))  # Category
 
     def resizeEvent(self, event):
-        font_size = max(12, self.width() // 100)  # Scale font size
+        """
+        Enhanced resize event handler with better font scaling
+        """
+        # Calculate base font size based on window width
+        base_width = 1000  # Reference width
+        current_width = self.width()
+        base_font_size = 12
+        
+        # Scale font size between 8 and 14 based on window width
+        scaled_font_size = max(8, min(14, int(base_font_size * (current_width / base_width))))
+        
+        # Apply scaled styling with adjusted padding
         self.setStyleSheet(f"""
             QTableView {{
-                font-size: {font_size}px;
+                font-size: {scaled_font_size}px;
             }}
             QPushButton {{
-                font-size: {font_size}px;
+                font-size: {scaled_font_size}px;
+                padding: {max(2, scaled_font_size//3)}px {max(4, scaled_font_size//2)}px;
             }}
             QLabel {{
-                font-size: {font_size}px;
+                font-size: {scaled_font_size}px;
             }}
             QLineEdit {{
-                font-size: {font_size}px;
+                font-size: {scaled_font_size}px;
+                padding: {max(2, scaled_font_size//4)}px;
+            }}
+            QListWidget {{
+                font-size: {scaled_font_size}px;
+            }}
+            QHeaderView::section {{
+                font-size: {scaled_font_size}px;
+                padding: {max(2, scaled_font_size//4)}px;
             }}
         """)
+        
+        # Adjust layout proportions
         self.adjust_column_widths()
         super().resizeEvent(event)
 
     def adjust_column_widths(self):
         """
-        Adjust column widths dynamically when resizing the window.
+        Enhanced column width adjustment with better responsive behavior
         """
+        if not hasattr(self, 'table'):
+            return
+            
         total_width = self.table.viewport().width()
-        self.table.setColumnWidth(0, int(total_width * 0.2))  # Name
-        self.table.setColumnWidth(1, int(total_width * 0.4))  # Command
-        self.table.setColumnWidth(2, int(total_width * 0.2))  # Tags
-        self.table.setColumnWidth(3, int(total_width * 0.2))  # Category
+        
+        # Base proportions for when we have enough space
+        base_proportions = {
+            0: 0.25,  # Name column - 25%
+            1: 0.35,  # Command column - 35%
+            2: 0.20,  # Tags column - 20%
+            3: 0.20   # Category column - 20%
+        }
+
+        # Calculate minimum total width needed
+        min_total = sum(self.min_column_widths.values())
+        
+        if total_width <= min_total:
+            # When space is too tight, use minimum widths
+            for col, min_width in self.min_column_widths.items():
+                self.table.setColumnWidth(col, min_width)
+        else:
+            # Distribute extra space proportionally
+            extra_space = total_width - min_total
+            for col, proportion in base_proportions.items():
+                min_width = self.min_column_widths[col]
+                extra = int(extra_space * proportion)
+                self.table.setColumnWidth(col, min_width + extra)
+
+        # Configure header behavior
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        
+        # Enable horizontal scrolling if needed
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+    def changeEvent(self, event):
+        """
+        Handle window state changes (maximize/restore)
+        """
+        if event.type() == event.WindowStateChange:
+            if self.windowState() & Qt.WindowMaximized:
+                # Window was maximized
+                self.adjust_column_widths()
+            elif event.oldState() & Qt.WindowMaximized:
+                # Window was restored
+                self.adjust_column_widths()
+        super().changeEvent(event)
 
     def init_menu(self):
         # Create menu bar
@@ -563,31 +717,23 @@ class Commander(QMainWindow):
 
     def save_sorting_preference(self, method):
         """
-        Save the current sorting preference to the database.
+        Save the current sorting preference to the in-memory database.
         """
         self.current_sort_method = method  # Update the tracking variable
-
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        cursor = conn_memory.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO settings (key, value) VALUES ('sort_preference', ?)
         """, (method,))
-        conn.commit()
-        conn.close()
+        conn_memory.commit()
 
     def load_sorting_preference(self):
         """
-        Load the saved sorting preference from the database.
+        Load the saved sorting preference from the in-memory database.
         """
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        cursor = conn_memory.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = 'sort_preference'")
         result = cursor.fetchone()
-        if result:
-            self.current_sort_method = result[0]
-        else:
-            self.current_sort_method = "newest"  # Default to newest
-        conn.close()
+        self.current_sort_method = result[0] if result else "newest"  # Default to "newest"
 
     def init_table_context_menu(self):
         """
@@ -811,7 +957,6 @@ class Commander(QMainWindow):
         self.model = ShortcutTableModel(self.shortcuts_data, self)
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -880,7 +1025,7 @@ class Commander(QMainWindow):
 
         splitter.setStretchFactor(0, 1)  # Sidebar expands less
         splitter.setStretchFactor(1, 4)  # Table expands more
-        splitter.setSizes([200, 800])  # Initial sizes (sidebar, table)
+        splitter.setSizes([50, 800])  # Initial sizes (sidebar, table)
 
         # Add the splitter to the main layout
         main_layout.addWidget(splitter)
@@ -925,9 +1070,11 @@ class Commander(QMainWindow):
     # THEME LOGIC
     ###########################################################################
     def apply_theme(self, theme_name):
-        """Applies the specified theme stylesheet to the QApplication."""
+        """
+        Applies the specified theme stylesheet to the QApplication.
+        """
         self.current_theme = theme_name
-        if (theme_name == "dark"):
+        if theme_name == "dark":
             QApplication.instance().setStyleSheet(DARK_STYLESHEET)
             if hasattr(self, 'info_label'):
                 self.info_label.setStyleSheet("color: #dddddd;")
@@ -935,46 +1082,59 @@ class Commander(QMainWindow):
             QApplication.instance().setStyleSheet(LIGHT_STYLESHEET)
             if hasattr(self, 'info_label'):
                 self.info_label.setStyleSheet("color: #333333;")
-        self.save_theme_preference()  # Save the new preference
+
+        self.save_theme_preference()  # Save the updated theme preference
+        print(f"Applied theme: {theme_name}")  # Debug output
 
     def save_theme_preference(self):
-        """Save the current theme preference to the database."""
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        """
+        Save the current theme preference to the in-memory database.
+        """
+        cursor = conn_memory.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO settings (key, value) VALUES ('theme', ?)
         """, (self.current_theme,))
-        conn.commit()
-        conn.close()
+        conn_memory.commit()
+        print(f"Theme '{self.current_theme}' saved to database.")  # Debug output
+
 
     def load_theme_preference(self):
-        """Load the saved theme preference from the database."""
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        """
+        Load the saved theme preference from the in-memory database.
+        """
+        cursor = conn_memory.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = 'theme'")
         result = cursor.fetchone()
+
         if result:
             self.current_theme = result[0]
+            print(f"Loaded theme: {self.current_theme}")  # Debug output
         else:
             self.current_theme = "light"  # Default to light theme
-        conn.close()
+            print("No theme found in database; defaulting to 'light'.")
+
         self.apply_theme(self.current_theme)
 
     ###########################################################################
     # LOADING / SAVING
     ###########################################################################
     def load_shortcuts(self):
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        """
+        Load shortcuts from the in-memory SQLite database.
+        """
+        cursor = conn_memory.cursor()
 
-        # Optimized query: Select only required columns
+        # Clear existing shortcuts data
+        self.shortcuts_data = []
+
         cursor.execute("""
-            SELECT s.id, s.name, s.command, s.description, c.name AS category, 
-                s.updated_at, s.usage_count
+            SELECT s.id, s.name, s.command, s.description, c.name AS category,
+                s.updated_at, s.usage_count, s.use_powershell
             FROM shortcuts s
             LEFT JOIN categories c ON s.category_id = c.id
             ORDER BY s.updated_at DESC
         """)
+
         self.shortcuts_data = [
             {
                 "id": row[0],
@@ -984,56 +1144,36 @@ class Commander(QMainWindow):
                 "category": row[4] or "",
                 "updated_at": row[5] or "",
                 "usage_count": int(row[6]) if row[6] else 0,
+                "use_powershell": bool(row[7]) if row[7] is not None else False,
             }
             for row in cursor.fetchall()
         ]
 
-        # Load tags for each shortcut
-        for shortcut in self.shortcuts_data:
-            cursor.execute("""
-                SELECT t.name
-                FROM tags t
-                JOIN shortcut_tags st ON t.id = st.tag_id
-                WHERE st.shortcut_id = ?
-            """, (shortcut["id"],))
-            shortcut["tags"] = [row[0] for row in cursor.fetchall()]
-            #print(f"Loaded tags for shortcut '{shortcut['name']}': {shortcut['tags']}")  # Debug print
-
-        conn.close()
+        print(f"Loaded shortcuts: {self.shortcuts_data}")  # Debug output
 
     def save_shortcuts(self):
         """
-        Save shortcuts to the SQLite database.
+        Save all shortcuts to the in-memory SQLite database.
         """
-        conn = sqlite3.connect(os.path.join(get_app_folder(), "commander.db"))
-        cursor = conn.cursor()
+        cursor = conn_memory.cursor()
 
-        # Save shortcuts
-        for shortcut in self.shortcuts_data:
-            cursor.execute("""
-                INSERT OR REPLACE INTO shortcuts (id, name, command, description, category_id)
-                VALUES (?, ?, ?, ?, (SELECT id FROM categories WHERE name = ?))
-            """, (shortcut.get("id"), shortcut["name"], shortcut["command"], shortcut["description"],
-                shortcut["category"]))
-
-            # Update tags for the shortcut
-            cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut.get("id"),))
-            for tag in shortcut["tags"]:
-                cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
+        # Save shortcuts in a batch transaction
+        with conn_memory:
+            for shortcut in self.shortcuts_data:
                 cursor.execute("""
-                    INSERT INTO shortcut_tags (shortcut_id, tag_id)
-                    SELECT ?, id FROM tags WHERE name = ?
-                """, (shortcut.get("id"), tag))
-                print(f"Saved tag '{tag}' for shortcut '{shortcut['name']}'")  # Debug print
-
-        # Save settings
-        for key, value in self.settings_data.items():
-            cursor.execute("""
-                INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
-            """, (key, value))
-
-        conn.commit()
-        conn.close()
+                    INSERT OR REPLACE INTO shortcuts (id, name, command, description, category_id, usage_count, use_powershell, updated_at)
+                    VALUES (?, ?, ?, ?, (SELECT id FROM categories WHERE name = ?), ?, ?, ?)
+                """, (
+                    shortcut.get("id"),
+                    shortcut["name"],
+                    shortcut["command"],
+                    shortcut["description"],
+                    shortcut["category"],
+                    shortcut["usage_count"],
+                    shortcut["use_powershell"],
+                    shortcut["updated_at"],
+                ))
+                print(f"Shortcut saved: {shortcut['name']}")  # Debug output
 
     ###########################################################################
     # TABLE LOGIC
@@ -1067,27 +1207,12 @@ class Commander(QMainWindow):
     ###########################################################################
     def refresh_table(self):
         """
-        Refreshes the table while keeping the current sorting and category filters.
+        Refresh the table while keeping the current sorting and category filters.
         """
-        print(f"Refreshing table with current sort method: {self.current_sort_method}")
-
-        # Reload shortcuts and categories
-        self.load_shortcuts()
-        self.update_category_sidebar()
-
-        # Apply the current sorting method
-        if hasattr(self, 'current_sort_method') and self.current_sort_method:
-            self.sort_table(self.current_sort_method)
-        else:
-            print("Invalid or missing sort method. Defaulting to 'newest'.")
-            self.sort_table("newest")
-
-        # Reapply the current filter (if any)
-        print("Reapplying filters after sorting.")
-        self.filter_table()
-
-        # Update the info label
-        self.update_info_label()
+        self.load_shortcuts()  # Reload data from the database
+        self.sort_table(self.current_sort_method)  # Reapply sorting
+        self.filter_table()  # Reapply filters if any
+        print(f"Refreshed table with {len(self.shortcuts_data)} shortcuts.")  # Debug output
 
     def filter_table(self):
         """
@@ -1253,18 +1378,33 @@ class Commander(QMainWindow):
 
         # Prepend the appropriate executor based on the file type
         if command.endswith(".bat"):
-            command = f"cmd.exe /c \"{command}\""
+            if shortcut.get("use_powershell", False):
+                command = f"powershell -NoExit -Command \"& '{command}'\""
+            else:
+                command = f"cmd.exe /c \"{command}\""
         elif command.endswith(".ps1"):
-            command = f"powershell -ExecutionPolicy Bypass -File \"{command}\""
+            command = f"powershell -ExecutionPolicy Bypass -NoExit -File \"{command}\""
         elif command.endswith(".exe"):
             command = f"\"{command}\""  # Enclose in quotes for safety
 
-        # Execute the command interactively
-        interactive_command = f"start cmd /k {command}"  # Use /k to keep the window open
+        # Execute based on terminal preference
+        if shortcut.get("use_powershell", False):
+            interactive_command = f"start powershell -NoExit -Command \"{command}\""
+        else:
+            interactive_command = f"start cmd /k {command}"  # Use /k to keep the window open
         print(f"Final interactive command: {interactive_command}")
 
+        # Run the command as a detached subprocess
         try:
-            subprocess.Popen(interactive_command, shell=True)
+            subprocess.Popen(
+                interactive_command,
+                shell=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.DETACHED_PROCESS if os.name == 'nt' else 0  # Windows-specific detachment
+            )
             print(f"Executing: {interactive_command}")
             self.update_log(f"Executed: {command}")  # Log the execution
         except Exception as e:
@@ -1284,11 +1424,10 @@ class Commander(QMainWindow):
         conn.commit()
         conn.close()
 
-        # Update the model data
+        # Update the model data for the specific row
         shortcut["usage_count"] += 1
         shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.model.layoutChanged.emit()  # Notify the view of the update
-        self.refresh_table()
+        self.update_shortcut_row(shortcut, row)  # Optimized row update
 
     def prompt_for_variables(self, placeholders, command):
         """
@@ -1342,6 +1481,15 @@ class Commander(QMainWindow):
         shortcut["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.update_table_row(row, shortcut)
         self.sort_table(self.current_sort_method)
+    def update_shortcut_row(self, shortcut, row_index):
+        """
+        Updates a single shortcut row in the model.
+        """
+        self.model.shortcuts[row_index] = shortcut  # Update the shortcut data in the model
+        self.model.dataChanged.emit(  # Notify the view to update the specific row
+            self.model.index(row_index, 0),  # Start index (first column of the row)
+            self.model.index(row_index, self.model.columnCount() - 1)  # End index (last column of the row)
+        )
         
     def update_table_row(self, row, shortcut):
         """
@@ -1386,8 +1534,7 @@ class Commander(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             new_data = dialog.get_data()
 
-            conn = sqlite3.connect(get_database_path())
-            cursor = conn.cursor()
+            cursor = conn_memory.cursor()
 
             # Ensure the category exists or create it
             cursor.execute("""
@@ -1400,9 +1547,10 @@ class Commander(QMainWindow):
 
             # Insert the new shortcut
             cursor.execute("""
-                INSERT INTO shortcuts (name, command, description, category_id)
-                VALUES (?, ?, ?, ?)
-            """, (new_data["name"], new_data["command"], new_data["description"], category_id))
+                INSERT INTO shortcuts (name, command, description, category_id, use_powershell)
+                VALUES (?, ?, ?, ?, ?)
+            """, (new_data["name"], new_data["command"], new_data["description"], 
+                category_id, new_data["use_powershell"]))
             shortcut_id = cursor.lastrowid
 
             # Batch insert tags
@@ -1422,8 +1570,7 @@ class Commander(QMainWindow):
                 VALUES (?, ?)
             """, shortcut_tags)
 
-            conn.commit()
-            conn.close()
+            conn_memory.commit()
 
             # Refresh the UI
             self.load_shortcuts()
@@ -1438,17 +1585,12 @@ class Commander(QMainWindow):
         table_row = selected_indexes[0].row()
         shortcut, original_index = self.displayed_pairs[table_row]
 
-        # Reload the shortcut data to ensure we have the latest changes
-        self.load_shortcuts()
-        updated_shortcut = self.shortcuts_data[original_index]
-
-        dialog = ShortcutDialog(self, shortcut_data=updated_shortcut)
+        dialog = ShortcutDialog(self, shortcut_data=shortcut)
 
         if dialog.exec_() == QDialog.Accepted:
             updated_data = dialog.get_data()
 
-            conn = sqlite3.connect(get_database_path())
-            cursor = conn.cursor()
+            cursor = conn_memory.cursor()
 
             # Ensure the category exists or create it
             cursor.execute("""
@@ -1462,11 +1604,12 @@ class Commander(QMainWindow):
             # Update the shortcut
             cursor.execute("""
                 UPDATE shortcuts
-                SET name = ?, command = ?, description = ?, category_id = ?
+                SET name = ?, command = ?, description = ?, category_id = ?, use_powershell = ?
                 WHERE id = ?
-            """, (updated_data["name"], updated_data["command"], updated_data["description"], category_id, shortcut["id"]))
+            """, (updated_data["name"], updated_data["command"], updated_data["description"], 
+                category_id, updated_data["use_powershell"], shortcut["id"]))
 
-            # Update tags for the shortcut
+            # Update tags
             cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut["id"],))
             for tag in updated_data["tags"]:
                 cursor.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag,))
@@ -1475,14 +1618,14 @@ class Commander(QMainWindow):
                     SELECT ?, id FROM tags WHERE name = ?
                 """, (shortcut["id"], tag))
 
-            conn.commit()
-            conn.close()
+            conn_memory.commit()
+            print(f"Shortcut updated: {updated_data['name']}")  # Debug output
 
             # Refresh the UI
             self.remove_unused_categories()  # Remove unused categories
-            self.load_shortcuts()  # Reload shortcuts data
+            self.load_shortcuts()
             self.update_category_sidebar()
-            self.refresh_table()  # Refresh the table to display the latest data
+            self.refresh_table()
 
     def on_delete_shortcut(self):
         selected_indexes = self.table.selectionModel().selectedRows()
@@ -1501,53 +1644,54 @@ class Commander(QMainWindow):
             QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            conn = sqlite3.connect(get_database_path())
-            cursor = conn.cursor()
+            cursor = conn_memory.cursor()
 
             # Delete the shortcut and its relationships
             cursor.execute("DELETE FROM shortcut_tags WHERE shortcut_id = ?", (shortcut["id"],))
             cursor.execute("DELETE FROM shortcuts WHERE id = ?", (shortcut["id"],))
 
-            conn.commit()
-            conn.close()
+            conn_memory.commit()
+            print(f"Shortcut deleted: {shortcut_name}")  # Debug output
 
-            # Remove unused categories and refresh the GUI
-            self.remove_unused_categories()  # Call the method here
+            # Refresh the UI
+            self.remove_unused_categories()  # Remove unused categories
             self.load_shortcuts()
             self.update_category_sidebar()
-            self.filter_table()
-
-    def remove_unused_tags(self):
-        """
-        Remove tags that are not associated with any shortcuts.
-        """
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
-
-        # Delete unused tags
-        cursor.execute("""
-            DELETE FROM tags
-            WHERE id NOT IN (SELECT DISTINCT tag_id FROM shortcut_tags)
-        """)
-
-        conn.commit()
-        conn.close()
+            self.refresh_table()
 
     def remove_unused_categories(self):
         """
         Remove categories that are no longer associated with any shortcuts.
         """
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+        print("remove_unused_categories called.")  # Debug log
+
+        cursor = conn_memory.cursor()
+
+        # Check for unused categories
+        cursor.execute("""
+            SELECT id, name
+            FROM categories
+            WHERE id NOT IN (
+                SELECT DISTINCT category_id
+                FROM shortcuts
+                WHERE category_id IS NOT NULL
+            )
+        """)
+        unused_categories = cursor.fetchall()
+        print(f"Unused categories found: {unused_categories}")  # Debug log
 
         # Delete unused categories
         cursor.execute("""
             DELETE FROM categories
-            WHERE id NOT IN (SELECT DISTINCT category_id FROM shortcuts)
+            WHERE id NOT IN (
+                SELECT DISTINCT category_id
+                FROM shortcuts
+                WHERE category_id IS NOT NULL
+            )
         """)
 
-        conn.commit()
-        conn.close()
+        conn_memory.commit()
+        print("Unused categories removed.")  # Debug log
 
     def update_category_sidebar(self):
         """
@@ -1555,10 +1699,8 @@ class Commander(QMainWindow):
         Includes an '(All Categories)' item to reset filter.
         """
         self.category_list.clear()
-        
-        # Fetch updated categories from the database
-        conn = sqlite3.connect(get_database_path())
-        cursor = conn.cursor()
+
+        cursor = conn_memory.cursor()
         cursor.execute("""
             SELECT name
             FROM categories
@@ -1566,7 +1708,6 @@ class Commander(QMainWindow):
             ORDER BY name
         """)
         categories = [row[0] for row in cursor.fetchall()]
-        conn.close()
 
         # Add an item to show all categories
         self.category_list.addItem("(All Categories)")
@@ -1619,6 +1760,15 @@ class ShortcutDialog(QDialog):
         self.link_file_button.clicked.connect(self.on_link_file)
         layout.addRow(QLabel("(Optional) Link Script:"), self.link_file_button)
 
+        # Add PowerShell toggle after category and apply current theme
+        self.powershell_toggle = QCheckBox("Use PowerShell instead of CMD")
+        if isinstance(parent, Commander):  # Check if parent is Commander
+            if parent.current_theme == "dark":
+                self.setStyleSheet(DARK_STYLESHEET)
+            else:
+                self.setStyleSheet(LIGHT_STYLESHEET)
+        layout.addRow("Terminal:", self.powershell_toggle)
+
         # If editing, populate fields
         if self.edit_mode and shortcut_data is not None:
             self.name_edit.setText(shortcut_data.get("name", ""))
@@ -1627,6 +1777,7 @@ class ShortcutDialog(QDialog):
             tag_list = shortcut_data.get("tags", [])
             self.tags_edit.setText(", ".join(tag_list))
             self.category_edit.setText(shortcut_data.get("category", ""))
+            self.powershell_toggle.setChecked(bool(shortcut_data.get("use_powershell", False)))
 
         # OK / Cancel
         self.ok_button = QPushButton("OK")
@@ -1657,7 +1808,8 @@ class ShortcutDialog(QDialog):
             "command": command,
             "description": description,
             "tags": tags_list,
-            "category": category
+            "category": category,
+            "use_powershell": self.powershell_toggle.isChecked()
         }
         self.accept()
 
@@ -1680,6 +1832,7 @@ class ShortcutDialog(QDialog):
             "description": description,
             "tags": tags_list,
             "category": category,
+            "use_powershell": self.powershell_toggle.isChecked()
         }
 
 def main():
@@ -1687,13 +1840,26 @@ def main():
         app = QApplication(sys.argv)
         app.setStyle(QStyleFactory.create("Fusion"))
 
+        # Initialize in-memory database
         init_database()
 
+        # Set up the main application window
         window = Commander()
         window.show()
-        sys.exit(app.exec_())
+
+        # Run the application
+        exit_code = app.exec_()
+
+        # Flush changes to disk on exit
+        flush_memory_to_disk()
+
+        # Clean up database connections
+        conn_memory.close()
+        conn_disk.close()
+
+        sys.exit(exit_code)
     except Exception as e:
-        traceback.print_exc()  # Log full traceback
-       #print(f"Unhandled exception: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 if __name__ == "__main__":
     main()
