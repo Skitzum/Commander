@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime
 
 from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtCore import Qt, QUrl, QAbstractTableModel
+from PyQt5.QtCore import Qt, QUrl, QAbstractTableModel, QThread
 from PyQt5.QtWidgets import (
     QApplication,
     QMenuBar,
@@ -33,10 +33,11 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QCheckBox,
     QListWidget,
+    QListWidgetItem,  # Add this import
     QSplitter,
     QMenu,
-    QDialogButtonBox,  # Add this import
-    QTextEdit  # Add this import
+    QDialogButtonBox,
+    QTextEdit
 )
 
 ###############################################################################
@@ -246,6 +247,26 @@ def init_database():
             print(f"Error executing line: {line}")
             print(f"SQLite error: {e}")
 
+    # Add new tables for groups if they don't exist
+    cursor_memory.execute("""
+        CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    cursor_memory.execute("""
+        CREATE TABLE IF NOT EXISTS group_shortcuts (
+            group_id INTEGER,
+            shortcut_id INTEGER,
+            execution_order INTEGER,
+            FOREIGN KEY (group_id) REFERENCES groups(id),
+            FOREIGN KEY (shortcut_id) REFERENCES shortcuts(id),
+            PRIMARY KEY (group_id, shortcut_id)
+        )
+    """)
+    
     conn_memory.commit()
 
 def flush_memory_to_disk():
@@ -256,9 +277,11 @@ def flush_memory_to_disk():
     cursor_disk = conn_disk.cursor()
 
     # Clear existing data from disk tables
-    tables_to_clear = ["settings", "shortcuts", "categories", "tags", "shortcut_tags", "preferences"]
+    tables_to_clear = ["settings", "shortcuts", "categories", "tags", "shortcut_tags", "preferences", "groups", "group_shortcuts"]
     for table in tables_to_clear:
         cursor_disk.execute(f"DELETE FROM {table};")
+        # Reset the autoincrement counter
+        cursor_disk.execute(f"DELETE FROM sqlite_sequence WHERE name='{table}';")
 
     # Dump in-memory data back to disk
     for line in conn_memory.iterdump():
@@ -269,10 +292,16 @@ def flush_memory_to_disk():
         ):
             continue
         try:
+            # Remove any INSERT statements that specify IDs for auto-increment tables
+            if line.startswith("INSERT INTO \"groups\""):
+                parts = line.split("VALUES")
+                if len(parts) == 2:
+                    values = eval(parts[1].rstrip(";"))
+                    # Skip the ID, only insert name and created_at
+                    new_line = f'INSERT INTO "groups" (name, created_at) VALUES ({repr(values[1])}, {repr(values[2])});'
+                    cursor_disk.execute(new_line)
+                    continue
             cursor_disk.execute(line)
-        except sqlite3.IntegrityError as e:
-            print(f"Integrity error executing line: {line}")
-            print(f"SQLite error: {e}")
         except sqlite3.Error as e:
             print(f"Error executing line: {line}")
             print(f"SQLite error: {e}")
@@ -421,6 +450,9 @@ class Commander(QMainWindow):
         self.current_sort_method = "newest"
         self.confirmation_pending = False
         self.log_text = ""
+        self.selected_group = None
+        self.is_group_selection_mode = False
+        self.previous_selection_mode = QAbstractItemView.SingleSelection  # Add this line
 
         # Window setup with dynamic sizing
         self.setWindowTitle("Commander")
@@ -450,6 +482,8 @@ class Commander(QMainWindow):
 
         # Initialize UI
         self.initUI()
+        # Initialize status bar after UI
+        self.status_bar = self.statusBar()  # Store as instance variable
         self.apply_theme(self.current_theme)
 
         # Set initial data
@@ -475,6 +509,10 @@ class Commander(QMainWindow):
         
         # Set smaller minimum window width
         self.setMinimumWidth(500)  # Allow window to be shrunk more
+
+        # Initialize context menu for groups
+        self.groups_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.groups_list.customContextMenuRequested.connect(self.show_group_context_menu)
 
     def set_default_column_widths(self):
         """
@@ -572,11 +610,11 @@ class Commander(QMainWindow):
         """
         Handle window state changes (maximize/restore)
         """
-        if event.type() == event.WindowStateChange:
-            if self.windowState() & Qt.WindowMaximized:
+        if (event.type() == event.WindowStateChange):
+            if (self.windowState() & Qt.WindowMaximized):
                 # Window was maximized
                 self.adjust_column_widths()
-            elif event.oldState() & Qt.WindowMaximized:
+            elif (event.oldState() & Qt.WindowMaximized):
                 # Window was restored
                 self.adjust_column_widths()
         super().changeEvent(event)
@@ -733,7 +771,7 @@ class Commander(QMainWindow):
         cursor = conn_memory.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = 'sort_preference'")
         result = cursor.fetchone()
-        self.current_sort_method = result[0] if result else "newest"  # Default to "newest"
+        self.current_sort_method = result[0] if result else "newest"  # Default to "newest" 
 
     def init_table_context_menu(self):
         """
@@ -744,28 +782,62 @@ class Commander(QMainWindow):
 
     def show_table_context_menu(self, position):
         """
-        Displays the context menu at the given position.
+        Enhanced context menu with dynamic group operations.
         """
         menu = QMenu(self)
-
-        # Add actions to the context menu
+        indexes = self.table.selectionModel().selectedRows()
+        
+        if not indexes:
+            return
+            
+        row = indexes[0].row()
+        shortcut = self.displayed_pairs[row][0]
+        
+        # Basic actions
         execute_action = menu.addAction("Execute")
-        copy_command_action = menu.addAction("Copy Command")
-        refresh_action = menu.addAction("Refresh")
-        add_action = menu.addAction("Add")
+        copy_action = menu.addAction("Copy Command")
+        menu.addSeparator()
         edit_action = menu.addAction("Edit")
         delete_action = menu.addAction("Delete")
+        
+        # Group operations submenu
+        groups_menu = None
+        if self.groups_list.count() > 0:  # Only if groups exist
+            menu.addSeparator()
+            groups_menu = menu.addMenu("Add to Group")
+            
+            # Add each group as an option
+            for i in range(self.groups_list.count()):
+                group_item = self.groups_list.item(i)
+                action = groups_menu.addAction(group_item.text())
+                action.setData(group_item.data(Qt.UserRole))
+                
+                # If shortcut is already in this group, disable the option
+                cursor = conn_memory.cursor()
+                cursor.execute("""
+                    SELECT 1 FROM group_shortcuts 
+                    WHERE group_id = ? AND shortcut_id = ?
+                """, (group_item.data(Qt.UserRole), shortcut["id"]))
+                
+                if cursor.fetchone():
+                    action.setEnabled(False)
+                    action.setText(f"{group_item.text()} (Already Added)")
 
-        # Map actions to their respective handlers
-        execute_action.triggered.connect(self.confirm_and_execute)
-        copy_command_action.triggered.connect(self.copy_selected_command)
-        refresh_action.triggered.connect(self.refresh_table)
-        add_action.triggered.connect(self.on_add_shortcut)
-        edit_action.triggered.connect(self.on_edit_shortcut)
-        delete_action.triggered.connect(self.on_delete_shortcut)
+        action = menu.exec_(self.table.viewport().mapToGlobal(position))
+        if not action:
+            return
 
-        # Show the context menu
-        menu.exec_(self.table.viewport().mapToGlobal(position))
+        if action == execute_action:
+            self.confirm_and_execute()
+        elif action == copy_action:
+            self.copy_selected_command()
+        elif action == edit_action:
+            self.on_edit_shortcut()
+        elif action == delete_action:
+            self.on_delete_shortcut()
+        elif groups_menu and action.parent() == groups_menu:
+            self.add_to_group(shortcut["id"], action.data())
+            self.info_label.setText(f"Added shortcut to group '{action.text()}'")
 
     def confirm_and_execute(self):
         """
@@ -902,10 +974,11 @@ class Commander(QMainWindow):
     def on_category_selected(self, item):
         """
         Called when the user clicks a category in the sidebar.
-        If '(All Categories)', reset self.selected_category to None.
-        Otherwise, set self.selected_category to the category text.
-        Then call filter_table().
+        Also resets any group selection.
         """
+        # Reset any group selection when changing categories
+        self.deselect_group()  # This now properly resets everything
+        
         cat_text = item.text()
         if (cat_text == "(All Categories)"):
             self.selected_category = None
@@ -932,9 +1005,53 @@ class Commander(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
 
         # 1) Left Sidebar: Category List
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # Create vertical splitter for categories and groups
+        left_splitter = QSplitter(Qt.Vertical)
+        
+        # Add category list to top of splitter
         self.category_list = QListWidget()
         self.category_list.itemClicked.connect(self.on_category_selected)
-        splitter.addWidget(self.category_list)  # Add the category list to the splitter
+        left_splitter.addWidget(self.category_list)
+        
+        # Add groups widget to bottom of splitter
+        groups_widget = QWidget()
+        groups_layout = QVBoxLayout(groups_widget)
+        
+        groups_header = QLabel("Groups")
+        groups_layout.addWidget(groups_header)
+        
+        self.groups_list = QListWidget()
+        self.groups_list.itemClicked.connect(self.on_group_selected)
+        groups_layout.addWidget(self.groups_list)
+        
+        # Add group management buttons
+        group_buttons = QHBoxLayout()
+        self.add_group_btn = QPushButton("+")
+        self.add_group_btn.setMaximumWidth(30)
+        self.add_group_btn.clicked.connect(self.on_add_group)
+        self.delete_group_btn = QPushButton("-")
+        self.delete_group_btn.setMaximumWidth(30)
+        self.delete_group_btn.clicked.connect(self.on_delete_group)
+        self.run_group_btn = QPushButton("Run")
+        self.run_group_btn.setMaximumWidth(50)
+        self.run_group_btn.clicked.connect(self.on_run_group)
+        
+        group_buttons.addWidget(self.add_group_btn)
+        group_buttons.addWidget(self.delete_group_btn)
+        group_buttons.addWidget(self.run_group_btn)
+        group_buttons.addStretch()
+        groups_layout.addLayout(group_buttons)
+        
+        left_splitter.addWidget(groups_widget)
+        
+        # Set initial sizes (categories:groups = 60:40)
+        left_splitter.setSizes([600, 400])
+        
+        left_layout.addWidget(left_splitter)
+        splitter.addWidget(left_panel)
 
         # 2) Right Panel
         right_panel = QVBoxLayout()
@@ -1003,7 +1120,14 @@ class Commander(QMainWindow):
         self.log_button.setMaximumWidth(200)
         self.log_button.clicked.connect(self.show_log_dialog)
 
+        # Add cancel button (hidden by default)
+        self.cancel_group_selection_button = QPushButton("Cancel Group Selection")
+        self.cancel_group_selection_button.setMaximumWidth(200)
+        self.cancel_group_selection_button.clicked.connect(self.cancel_group_selection_mode)
+        self.cancel_group_selection_button.hide()
+
         bottom_layout.addWidget(self.execute_button)
+        bottom_layout.addWidget(self.cancel_group_selection_button)
         bottom_layout.addWidget(self.log_button)  # Add log button to layout
 
         right_panel.addLayout(bottom_layout)
@@ -1032,6 +1156,7 @@ class Commander(QMainWindow):
 
         # Update categories and table
         self.update_category_sidebar()
+        self.update_groups_list()
         self.refresh_table()
 
     def show_log_dialog(self):
@@ -1209,9 +1334,18 @@ class Commander(QMainWindow):
         """
         Refresh the table while keeping the current sorting and category filters.
         """
-        self.load_shortcuts()  # Reload data from the database
-        self.sort_table(self.current_sort_method)  # Reapply sorting
-        self.filter_table()  # Reapply filters if any
+        if self.selected_group:
+            # Re-select the current group to refresh its view
+            current_group = self.groups_list.findItems(
+                self.groups_list.currentItem().text(), 
+                Qt.MatchExactly
+            )[0]
+            self.on_group_selected(current_group)
+        else:
+            # Normal refresh
+            self.load_shortcuts()
+            self.sort_table(self.current_sort_method)
+            self.filter_table()
         print(f"Refreshed table with {len(self.shortcuts_data)} shortcuts.")  # Debug output
 
     def filter_table(self):
@@ -1276,6 +1410,20 @@ class Commander(QMainWindow):
         Handles table row selection.
         Updates the info_label with the selected shortcut details.
         """
+        if self.is_group_selection_mode:
+            selected_count = len(self.table.selectionModel().selectedRows())
+            self.status_bar.showMessage(
+                f"Selected {selected_count} shortcut{'s' if selected_count != 1 else ''} "
+                f"for group: {self.current_group_item.text()}"
+            )
+            
+            # Highlight save button if items are selected
+            if selected_count > 0:
+                self.add_button.setStyleSheet("background-color: red; color: white;")
+            else:
+                self.add_button.setStyleSheet("")
+            return
+
         indexes = self.table.selectionModel().selectedRows()
         if indexes:
             row = indexes[0].row()
@@ -1303,6 +1451,13 @@ class Commander(QMainWindow):
                 self.execute_button.setEnabled(True)
                 self.edit_button.setEnabled(True)
                 self.delete_button.setEnabled(True)
+                
+                # Add group management context menu
+                menu = QMenu(self)
+                if self.selected_group:
+                    add_to_group = menu.addAction("Add to Group")
+                    add_to_group.triggered.connect(lambda: self.add_to_group(shortcut["id"]))
+
         else:
             # If no selection, show only filter context
             filter_info = []
@@ -1324,16 +1479,31 @@ class Commander(QMainWindow):
     # TWO-STEP EXECUTION
     ###########################################################################
     def on_execute_clicked(self):
-        if not self.confirmation_pending:
-            self.execute_button.setText("Confirm")
-            self.confirmation_pending = True
-            # Turn green
-            self.execute_button.setStyleSheet("background-color: green; color: white;")
+        """
+        Modified to handle both single shortcut and group execution
+        """
+        if self.selected_group:
+            # Handle group execution
+            if not self.confirmation_pending:
+                self.execute_button.setText("Confirm Run Group")
+                self.confirmation_pending = True
+                self.execute_button.setStyleSheet("background-color: green; color: white;")
+            else:
+                self.on_run_group()
+                self.execute_button.setText("Run Group")
+                self.confirmation_pending = False
+                self.execute_button.setStyleSheet("background-color: red; color: white;")
         else:
-            self.run_selected_command()
-            self.execute_button.setText("Execute")
-            self.confirmation_pending = False
-            self.execute_button.setStyleSheet("background-color: red; color: white;")
+            # Handle single shortcut execution
+            if not self.confirmation_pending:
+                self.execute_button.setText("Confirm")
+                self.confirmation_pending = True
+                self.execute_button.setStyleSheet("background-color: green; color: white;")
+            else:
+                self.run_selected_command()
+                self.execute_button.setText("Execute")
+                self.confirmation_pending = False
+                self.execute_button.setStyleSheet("background-color: red; color: white;")
 
     def run_selected_command(self):
         """
@@ -1358,7 +1528,7 @@ class Commander(QMainWindow):
             return
 
         # Detect and handle placeholders
-        placeholders = re.findall(r"{(.*?)}", command)
+        placeholders = re.findall(r"{{(.*?)}}", command)
         if placeholders:
             print(f"Detected placeholders: {placeholders}")
             placeholder_values = self.prompt_for_variables(placeholders, command)
@@ -1368,10 +1538,10 @@ class Commander(QMainWindow):
                 return
             # Replace the placeholders with the user-provided values
             for ph, val in placeholder_values.items():
-                command = command.replace(f"{{{ph}}}", val)
+                command = command.replace(f"{{{{{ph}}}}}", val)
 
         # Re-validate command to check for unresolved placeholders
-        if "{" in command or "}" in command:
+        if "{{" in command or "}}" in command:
             self.info_label.setText("Invalid command: Unresolved placeholders remain.")
             print("Invalid or unresolved placeholders remain in command:", command)
             return
@@ -1438,12 +1608,12 @@ class Commander(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         command_layout = QHBoxLayout()
-        command_parts = re.split(r"({.*?})", command)
+        command_parts = re.split(r"({{.*?}})", command)
         input_fields = {}
 
         for part in command_parts:
-            if part.startswith("{") and part.endswith("}"):
-                placeholder = part[1:-1]
+            if part.startswith("{{") and part.endswith("}}"):
+                placeholder = part[2:-2]
                 input_field = QLineEdit(dialog)
                 input_field.setPlaceholderText(placeholder)  # Set ghost text
                 input_fields[placeholder] = input_field
@@ -1720,71 +1890,614 @@ class Commander(QMainWindow):
         self.category_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.category_list.customContextMenuRequested.connect(self.show_category_context_menu)
 
-###############################################################################
-# Shortcut editing
-###############################################################################
+    def on_add_group(self):
+        name, ok = QInputDialog.getText(self, "New Group", "Enter group name:")
+        if ok and name.strip():
+            cursor = conn_memory.cursor()
+            try:
+                cursor.execute("INSERT INTO groups (name) VALUES (?)", (name.strip(),))
+                conn_memory.commit()
+                self.update_groups_list()
+            except sqlite3.IntegrityError:
+                QMessageBox.warning(self, "Error", "A group with that name already exists.")
 
-class ShortcutDialog(QDialog):
-    def __init__(self, parent=None, shortcut_data=None):
-        super().__init__(parent)
-        self.setWindowTitle("Shortcut")
+    def on_delete_group(self):
+        current = self.groups_list.currentItem()
+        if not current:
+            return
+            
+        reply = QMessageBox.question(
+            self, "Confirm Delete",
+            f"Delete group '{current.text()}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            cursor = conn_memory.cursor()
+            cursor.execute("DELETE FROM groups WHERE name = ?", (current.text(),))
+            cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", 
+                         (current.data(Qt.UserRole),))
+            conn_memory.commit()
+            self.update_groups_list()
 
-        self.result_data = {}
-        self.edit_mode = (shortcut_data is not None)
+    def on_group_selected(self, item):
+        """Called when a group is selected from the groups list"""
+        # Reset confirmation state when changing selection
+        self.confirmation_pending = False
+        
+        if item is None:
+            self.deselect_group()
+            return
+            
+        self.selected_group = item.data(Qt.UserRole)
+        self.delete_group_btn.setEnabled(True)
+        self.run_group_btn.setEnabled(True)
+        
+        # Update table to show group shortcuts
+        cursor = conn_memory.cursor()
+        # Modified query to explicitly specify columns
+        cursor.execute("""
+            SELECT 
+                s.id,
+                s.name,
+                s.command,
+                s.description,
+                s.category_id,
+                s.usage_count,
+                s.use_powershell,
+                s.updated_at
+            FROM shortcuts s
+            JOIN group_shortcuts gs ON s.id = gs.shortcut_id
+            WHERE gs.group_id = ?
+            ORDER BY gs.execution_order
+        """, (self.selected_group,))
+        
+        # Convert to shortcut dictionaries with correct column mapping
+        group_shortcuts = [
+            {
+                "id": row[0],
+                "name": row[1],
+                "command": row[2],
+                "description": row[3] or "No description available",
+                "category": "",  # Category will be filled later
+                "usage_count": int(row[5]) if row[5] is not None else 0,  # Fixed column index
+                "use_powershell": bool(row[6]) if row[6] is not None else False,
+                "updated_at": row[7] or ""  # Fixed column index
+            }
+            for row in cursor.fetchall()
+        ]
+        
+        # Update displayed pairs and model
+        self.displayed_pairs = [(s, i) for i, s in enumerate(group_shortcuts)]
+        self.model.shortcuts = group_shortcuts
+        self.model.layoutChanged.emit()
+        
+        # Update status and button text
+        self.info_label.setText(f"Showing {len(group_shortcuts)} shortcuts in group '{item.text()}'")
+        self.execute_button.setText("Run Group")
+        self.execute_button.setEnabled(len(group_shortcuts) > 0)
+    def deselect_group(self):
+        """Deselect the current group and reset to normal view."""
+        self.selected_group = None
+        self.groups_list.clearSelection()
+        self.execute_button.setText("Execute")
+        self.execute_button.setEnabled(False)
+        self.confirmation_pending = False
+        
+        # Reset button states
+        self.delete_group_btn.setEnabled(False)
+        self.run_group_btn.setEnabled(False)
+        
+        # Refresh table to show all shortcuts
+        self.load_shortcuts()
+        self.sort_table(self.current_sort_method)
+        self.filter_table()
 
-        layout = QFormLayout()
-        self.setLayout(layout)
+    def update_groups_list(self):
+        """Refresh the groups list widget"""
+        self.groups_list.clear()
+        cursor = conn_memory.cursor()
+        cursor.execute("SELECT id, name FROM groups ORDER BY name")
+        for group_id, name in cursor.fetchall():
+            item = QListWidgetItem(name)  # Use QListWidgetItem directly
+            item.setData(Qt.UserRole, group_id)
+            self.groups_list.addItem(item)
 
-        # Name
-        self.name_edit = QLineEdit()
-        layout.addRow(QLabel("Name:"), self.name_edit)
+    def on_run_group(self):
+        """
+        Execute all shortcuts in the selected group in order.
+        """
+        if not self.selected_group:
+            return
+            
+        cursor = conn_memory.cursor()
+        cursor.execute("""
+            SELECT s.* FROM shortcuts s
+            JOIN group_shortcuts gs ON s.id = gs.shortcut_id
+            WHERE gs.group_id = ?
+            ORDER BY gs.execution_order
+        """, (self.selected_group,))
+        
+        shortcuts = cursor.fetchall()
+        
+        if not shortcuts:
+            QMessageBox.information(self, "Run Group", "No shortcuts in this group.")
+            return
 
-        # Command
-        self.command_edit = QLineEdit()
-        layout.addRow(QLabel("Command (use {placeholder} if needed):"), self.command_edit)
+        preview = "\n".join([f"• {row[1]}: {row[2]}" for row in shortcuts])
+        reply = QMessageBox.question(
+            self,
+            "Confirm Group Execution",
+            f"Execute these {len(shortcuts)} shortcuts?\n\n{preview}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            success_count = 0
+            for shortcut in shortcuts:
+                QApplication.processEvents()  # Keep UI responsive
+                if self.execute_shortcut(shortcut):
+                    success_count += 1
+                QThread.msleep(500)  # Reduced delay between executions
+                
+            self.info_label.setText(
+                f"Group execution complete: {success_count}/{len(shortcuts)} successful"
+            )
 
-        # Description
-        self.description_edit = QLineEdit()
-        layout.addRow(QLabel("Description:"), self.description_edit)
+    def add_to_group(self, shortcut_id, group_id):
+        """
+        Add a shortcut to a group with smart ordering
+        """
+        cursor = conn_memory.cursor()
+        
+        # Get the next execution order number
+        cursor.execute("""
+            SELECT COALESCE(MAX(execution_order), -1) + 1
+            FROM group_shortcuts
+            WHERE group_id = ?
+        """, (group_id,))
+        
+        next_order = cursor.fetchone()[0]
+        
+        # Add the shortcut to the group if not already present
+        cursor.execute("""
+            INSERT OR IGNORE INTO group_shortcuts (group_id, shortcut_id, execution_order)
+            VALUES (?, ?, ?)
+        """, (group_id, shortcut_id, next_order))
+        
+        conn_memory.commit()
+        
+        # If the group is currently selected, refresh its view
+        if self.selected_group == group_id:
+            self.on_group_selected(self.groups_list.currentItem())
 
-        # Tags
-        self.tags_edit = QLineEdit()
-        layout.addRow(QLabel("Tags (comma-separated):"), self.tags_edit)
+    def show_group_context_menu(self, position):
+        """Show context menu for groups list with enhanced options."""
+        group_item = self.groups_list.itemAt(position)
+        if not group_item:
+            return
+            
+        menu = QMenu(self)
+        edit_shortcuts = menu.addAction("Edit Shortcuts")
+        manage_order = menu.addAction("Manage Order")
+        menu.addSeparator()
+        rename_action = menu.addAction("Rename Group")
+        clear_action = menu.addAction("Clear Shortcuts")
+        menu.addSeparator()
+        unselect_action = menu.addAction("Unselect Group")  # Add unselect option
+        delete_action = menu.addAction("Delete Group")
+        
+        action = menu.exec_(self.groups_list.viewport().mapToGlobal(position))
+        if not action:
+            return
+            
+        if action == edit_shortcuts:
+            self.enter_group_selection_mode(group_item)
+        elif action == manage_order:
+            self.show_manage_shortcuts_dialog(group_item)
+        elif action == rename_action:
+            self.rename_group(group_item)
+        elif action == clear_action:
+            self.clear_group_shortcuts(group_item)
+        elif action == unselect_action:
+            self.deselect_group()
+        elif action == delete_action:
+            self.on_delete_group()
 
-        # Category
-        self.category_edit = QLineEdit()
-        layout.addRow(QLabel("Category:"), self.category_edit)
+    def enter_group_selection_mode(self, group_item):
+        """Enter mode for selecting shortcuts for a group."""
+        self.is_group_selection_mode = True
+        self.current_group_item = group_item
+        self.previous_selection_mode = self.table.selectionMode()  # Store current mode
+        self.table.setSelectionMode(QAbstractItemView.MultiSelection)
+        
+        # Get existing shortcuts in group
+        cursor = conn_memory.cursor()
+        cursor.execute("""
+            SELECT shortcut_id FROM group_shortcuts 
+            WHERE group_id = ?
+        """, (group_item.data(Qt.UserRole),))
+        existing_shortcuts = {row[0] for row in cursor.fetchall()}
+        
+        # Pre-select existing shortcuts
+        for row in range(len(self.displayed_pairs)):
+            shortcut = self.displayed_pairs[row][0]
+            if shortcut['id'] in existing_shortcuts:
+                self.table.selectRow(row)
+        
+        # Update UI for selection mode
+        self.status_bar.showMessage(f"Select shortcuts for group: {group_item.text()}")
+        self.execute_button.hide()
+        self.cancel_group_selection_button.show()
+        self.add_button.setText("Save Group Selection")
+        self.add_button.clicked.disconnect()
+        self.add_button.clicked.connect(self.save_group_shortcuts)
+        
+        # Disable other buttons
+        self.edit_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
 
-        # Link script button if desired
-        self.link_file_button = QPushButton("Link .exe, .bat, or .ps1")
-        self.link_file_button.clicked.connect(self.on_link_file)
-        layout.addRow(QLabel("(Optional) Link Script:"), self.link_file_button)
+    def clear_group_shortcuts(self, group_item):
+        """Remove all shortcuts from a group."""
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Clear",
+            f"Remove all shortcuts from group '{group_item.text()}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            group_id = group_item.data(Qt.UserRole)
+            cursor = conn_memory.cursor()
+            cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", (group_id,))
+            conn_memory.commit()
+            self.info_label.setText(f"Cleared all shortcuts from group '{group_item.text()}'")
 
-        # Add PowerShell toggle after category and apply current theme
-        self.powershell_toggle = QCheckBox("Use PowerShell instead of CMD")
-        if isinstance(parent, Commander):  # Check if parent is Commander
-            if parent.current_theme == "dark":
-                self.setStyleSheet(DARK_STYLESHEET)
+    def save_group_shortcuts(self):
+        """Save the selected shortcuts to the current group."""
+        if not self.is_group_selection_mode or not hasattr(self, 'current_group_item'):
+            return
+            
+        selected_rows = self.table.selectionModel().selectedRows()
+        selected_shortcuts = [self.displayed_pairs[index.row()][0]['id'] for index in selected_rows]
+        
+        group_id = self.current_group_item.data(Qt.UserRole)
+        cursor = conn_memory.cursor()
+        
+        # Clear existing shortcuts
+        cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", (group_id,))
+        
+        # Add new shortcuts with order
+        for order, shortcut_id in enumerate(selected_shortcuts):
+            cursor.execute("""
+                INSERT INTO group_shortcuts (group_id, shortcut_id, execution_order)
+                VALUES (?, ?, ?)
+            """, (group_id, shortcut_id, order))
+        
+        conn_memory.commit()
+        
+        # Exit selection mode and update UI
+        self.exit_group_selection_mode()
+        self.info_label.setText(f"Updated shortcuts in group '{self.current_group_item.text()}'")
+
+    def cancel_group_selection_mode(self):
+        """
+        Exit group selection mode without saving changes.
+        """
+        self.exit_group_selection_mode()
+
+    def exit_group_selection_mode(self):
+        """
+        Restore normal table mode.
+        """
+        if not hasattr(self, 'is_group_selection_mode'):
+            return
+            
+        self.is_group_selection_mode = False
+        
+        # Set back to single selection mode if previous mode wasn't stored
+        selection_mode = getattr(self, 'previous_selection_mode', QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(selection_mode)
+        
+        self.status_bar.clearMessage()
+        
+        # Remove the selection info label
+        if hasattr(self, 'selection_info_label'):
+            self.selection_info_label.deleteLater()
+            delattr(self, 'selection_info_label')
+        
+        self.execute_button.show()
+        self.cancel_group_selection_button.hide()
+        self.add_button.setText("Add Shortcut")
+        self.add_button.setStyleSheet("")  # Reset button style
+        self.add_button.clicked.disconnect()
+        self.add_button.clicked.connect(self.on_add_shortcut)
+        
+        # Re-enable buttons
+        self.edit_button.setEnabled(True)
+        self.delete_button.setEnabled(True)
+        
+        # Clear selection
+        self.table.clearSelection()
+
+    def show_add_shortcuts_dialog(self, group_item):
+        """
+        Show dialog for adding shortcuts to a group.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Add Shortcuts to {group_item.text()}")
+        layout = QVBoxLayout(dialog)
+
+        # Create list widget for shortcuts
+        shortcuts_list = QListWidget(dialog)
+        shortcuts_list.setSelectionMode(QAbstractItemView.MultiSelection)
+
+        # Populate with available shortcuts
+        group_id = group_item.data(Qt.UserRole)
+        cursor = conn_memory.cursor()
+        
+        # Get existing shortcuts in the group
+        cursor.execute("""
+            SELECT shortcut_id FROM group_shortcuts WHERE group_id = ?
+        """, (group_id,))
+        existing_shortcuts = {row[0] for row in cursor.fetchall()}
+
+        # Get all shortcuts
+        cursor.execute("SELECT id, name, command FROM shortcuts ORDER BY name")
+        for row in cursor.fetchall():
+            item = QListWidgetItem(f"{row[1]} ({row[2]})")
+            item.setData(Qt.UserRole, row[0])
+            shortcuts_list.addItem(item)
+            # Pre-select if already in group
+            item.setSelected(row[0] in existing_shortcuts)
+
+        layout.addWidget(shortcuts_list)
+
+        # Add buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec_() == QDialog.Accepted:
+            # Get selected shortcuts
+            selected_ids = [item.data(Qt.UserRole) for item in shortcuts_list.selectedItems()]
+            
+            # Clear existing shortcuts
+            cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", (group_id,))
+            
+            # Add new shortcuts with order
+            for order, shortcut_id in enumerate(selected_ids):
+                cursor.execute("""
+                    INSERT INTO group_shortcuts (group_id, shortcut_id, execution_order)
+                    VALUES (?, ?, ?)
+                """, (group_id, shortcut_id, order))
+            
+            conn_memory.commit()
+            self.info_label.setText(f"Updated shortcuts in group '{group_item.text()}'")
+
+    def show_manage_shortcuts_dialog(self, group_item):
+        """
+        Show dialog for managing shortcuts order in a group.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Manage Shortcuts in {group_item.text()}")
+        layout = QVBoxLayout(dialog)
+
+        # Create list widget for shortcuts
+        shortcuts_list = QListWidget(dialog)
+        shortcuts_list.setDragDropMode(QAbstractItemView.InternalMove)
+
+        # Get shortcuts in order
+        group_id = group_item.data(Qt.UserRole)
+        cursor = conn_memory.cursor()
+        cursor.execute("""
+            SELECT s.id, s.name, s.command
+            FROM shortcuts s
+            JOIN group_shortcuts gs ON s.id = gs.shortcut_id
+            WHERE gs.group_id = ?
+            ORDER BY gs.execution_order
+        """, (group_id,))
+
+        # Add shortcuts to list
+        for row in cursor.fetchall():
+            item = QListWidgetItem(f"{row[1]} ({row[2]})")
+            item.setData(Qt.UserRole, row[0])
+            shortcuts_list.addItem(item)
+
+        layout.addWidget(shortcuts_list)
+
+        # Add buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec_() == QDialog.Accepted:
+            # Save new order
+            cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", (group_id,))
+            
+            for order in range(shortcuts_list.count()):
+                item = shortcuts_list.item(order)
+                shortcut_id = item.data(Qt.UserRole)
+                cursor.execute("""
+                    INSERT INTO group_shortcuts (group_id, shortcut_id, execution_order)
+                    VALUES (?, ?, ?)
+                """, (group_id, shortcut_id, order))
+            
+            conn_memory.commit()
+            self.info_label.setText(f"Updated shortcuts order in group '{group_item.text()}'")
+
+    def on_table_context_menu(self, position):
+        """
+        Enhanced table context menu with group operations.
+        """
+        menu = QMenu(self)
+        
+        # Get selected shortcut
+        indexes = self.table.selectionModel().selectedRows()
+        if indexes:
+            row = indexes[0].row()
+            shortcut = self.displayed_pairs[row][0]
+            
+            # Add basic actions
+            execute_action = menu.addAction("Execute")
+            copy_command_action = menu.addAction("Copy Command")
+            menu.addSeparator()
+            edit_action = menu.addAction("Edit")
+            delete_action = menu.addAction("Delete")
+            
+            # Add groups submenu
+            if len(self.groups_list) > 0:  # Only if groups exist
+                menu.addSeparator()
+                groups_menu = menu.addMenu("Add to Group")
+                
+                # Add each group as an action
+                for i in range(self.groups_list.count()):
+                    group_item = self.groups_list.item(i)
+                    group_action = groups_menu.addAction(group_item.text())
+                    group_action.setData(group_item.data(Qt.UserRole))
+
+            action = menu.exec_(self.table.viewport().mapToGlobal(position))
+            
+            if not action:
+                return
+                
+            if action == execute_action:
+                self.confirm_and_execute()
+            elif action == copy_command_action:
+                self.copy_selected_command()
+            elif action == edit_action:
+                self.on_edit_shortcut()
+            elif action == delete_action:
+                self.on_delete_shortcut()
+            elif action.parent() == groups_menu:
+                # Add to selected group
+                group_id = action.data()
+                cursor = conn_memory.cursor()
+                
+                # Get next execution order for the group
+                cursor.execute("""
+                    SELECT COALESCE(MAX(execution_order), -1) + 1
+                    FROM group_shortcuts
+                    WHERE group_id = ?
+                """, (group_id,))
+                next_order = cursor.fetchone()[0]
+                
+                # Add shortcut to group
+                cursor.execute("""
+                    INSERT OR REPLACE INTO group_shortcuts (group_id, shortcut_id, execution_order)
+                    VALUES (?, ?, ?)
+                """, (group_id, shortcut["id"], next_order))
+                
+                conn_memory.commit()
+                self.info_label.setText(f"Added shortcut to group '{action.text()}'")
+
+    def execute_shortcut(self, shortcut_data):
+        """
+        Execute a shortcut from its raw database data.
+        Used primarily for group execution.
+        """
+        # Extract relevant data from the database row
+        shortcut = {
+            "id": shortcut_data[0],
+            "name": shortcut_data[1],
+            "command": shortcut_data[2],
+            "description": shortcut_data[3],
+            "use_powershell": bool(shortcut_data[7]) if len(shortcut_data) > 7 else False
+        }
+
+        # Validate command
+        command = shortcut.get("command", "").strip()
+        if not command:
+            self.info_label.setText(f"No command for shortcut: {shortcut.get('name')}")
+            return
+
+        # Add placeholder handling
+        placeholders = re.findall(r"{{(.*?)}}", command)
+        if placeholders:
+            print(f"Detected placeholders: {placeholders}")
+            placeholder_values = self.prompt_for_variables(placeholders, command)
+            if not placeholder_values:  # Handle missing input
+                self.info_label.setText(f"Execution canceled for {shortcut['name']}. Missing values for placeholders.")
+                print("Command canceled due to missing values for placeholders.")
+                return
+            # Replace the placeholders with the user-provided values
+            for ph, val in placeholder_values.items():
+                command = command.replace(f"{{{{{ph}}}}}", val)
+
+        # Re-validate command to check for unresolved placeholders
+        if "{{" in command or "}}" in command:
+            self.info_label.setText(f"Invalid command for {shortcut['name']}: Unresolved placeholders remain.")
+            print("Invalid or unresolved placeholders remain in command:", command)
+            return
+
+        # Rest of execution logic
+        # Prepare command based on file type
+        if command.endswith(".bat"):
+            if shortcut.get("use_powershell", False):
+                command = f"powershell -NoExit -Command \"& '{command}'\""
             else:
-                self.setStyleSheet(LIGHT_STYLESHEET)
-        layout.addRow("Terminal:", self.powershell_toggle)
+                command = f"cmd.exe /c \"{command}\""
+        elif command.endswith(".ps1"):
+            command = f"powershell -ExecutionPolicy Bypass -NoExit -File \"{command}\""
+        elif command.endswith(".exe"):
+            command = f"\"{command}\""
 
-        # If editing, populate fields
-        if self.edit_mode and shortcut_data is not None:
-            self.name_edit.setText(shortcut_data.get("name", ""))
-            self.command_edit.setText(shortcut_data.get("command", ""))
-            self.description_edit.setText(shortcut_data.get("description", ""))
-            tag_list = shortcut_data.get("tags", [])
-            self.tags_edit.setText(", ".join(tag_list))
-            self.category_edit.setText(shortcut_data.get("category", ""))
-            self.powershell_toggle.setChecked(bool(shortcut_data.get("use_powershell", False)))
+        # Execute based on terminal preference
+        if shortcut.get("use_powershell", False):
+            interactive_command = f"start powershell -NoExit -Command \"{command}\""
+        else:
+            interactive_command = f"start cmd /k {command}"
 
-        # OK / Cancel
-        self.ok_button = QPushButton("OK")
-        self.ok_button.clicked.connect(self.on_ok_clicked)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.reject)
-        layout.addRow(self.ok_button, self.cancel_button)
+        # Execute the command
+        try:
+            subprocess.Popen(
+                interactive_command,
+                shell=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.DETACHED_PROCESS if os.name == 'nt' else 0
+            )
+
+            # Update usage count and timestamp
+            cursor = conn_memory.cursor()
+            cursor.execute("""
+                UPDATE shortcuts 
+                SET usage_count = usage_count + 1,
+                    updated_at = ?
+                WHERE id = ?
+            """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), shortcut["id"]))
+            conn_memory.commit()
+
+            # Log execution
+            self.update_log(f"Executed group shortcut: {shortcut['name']} - {command}")
+            self.info_label.setText(f"Executed: {shortcut['name']}")
+
+        except Exception as e:
+            self.info_label.setText(f"Error executing {shortcut['name']}: {str(e)}")
+            self.update_log(f"Error executing {shortcut['name']}: {str(e)}")
+
+    def clear_group_shortcuts(self, group_item):
+        """
+        Remove all shortcuts from a group.
+        """
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Clear",
+            f"Remove all shortcuts from group '{group_item.text()}'?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            group_id = group_item.data(Qt.UserRole)
+            cursor = conn_memory.cursor()
+            cursor.execute("DELETE FROM group_shortcuts WHERE group_id = ?", (group_id,))
+            conn_memory.commit()
+            self.info_label.setText(f"Cleared all shortcuts from group '{group_item.text()}'")
 
     def on_link_file(self):
         file_filter = "Executables / Scripts (*.exe *.bat *.ps1);;All Files (*)"
@@ -1815,7 +2528,7 @@ class ShortcutDialog(QDialog):
 
     def get_data(self):
         """
-        Returns the final data from the dialog as a dict.
+        Returns the dialog data as a dictionary.
         """
         name = self.name_edit.text().strip()
         command = self.command_edit.text().strip()
@@ -1861,5 +2574,6 @@ def main():
     except Exception as e:
         traceback.print_exc()
         sys.exit(1)
+
 if __name__ == "__main__":
     main()
